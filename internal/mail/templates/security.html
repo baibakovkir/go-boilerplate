@@ -165,19 +165,35 @@
                             >
                               {{.SecretLabel}}
                             </div>
+                            {{if .IsCode}}
                             <div
                               style="
                                 padding-top: 10px;
                                 font-family: Consolas,'Courier New',monospace;
-                                font-size: {{if .IsCode}}32px{{else}}16px{{end}};
-                                line-height: {{if .IsCode}}42px{{else}}26px{{end}};
+                                font-size: 32px;
+                                line-height: 42px;
                                 font-weight: 700;
-                                letter-spacing: {{if .IsCode}}6px{{else}}0{{end}};
+                                letter-spacing: 6px;
                                 color: #2948c7;
                                 overflow-wrap: anywhere;
                                 word-break: break-all;
                               "
                             >
+                            {{else}}
+                            <div
+                              style="
+                                padding-top: 10px;
+                                font-family: Consolas,'Courier New',monospace;
+                                font-size: 16px;
+                                line-height: 26px;
+                                font-weight: 700;
+                                letter-spacing: 0;
+                                color: #2948c7;
+                                overflow-wrap: anywhere;
+                                word-break: break-all;
+                              "
+                            >
+                            {{end}}
                               {{.Secret}}
                             </div>
                           </td>

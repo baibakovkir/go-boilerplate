@@ -11,7 +11,9 @@
 
 # Локальные настройки редакторов
 /.idea/
-/.vscode/
+/.vscode/*
+!/.vscode/settings.json
+!/.vscode/css-custom-data.json
 .DS_Store
 
 # Файлы загрузок, экспорта и временные сборки
