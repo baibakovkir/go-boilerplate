@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1"
+    >
+    <meta
+      name="color-scheme"
+      content="light"
+    >
+    <title>
+      {{.Title}}
+    </title>
+  </head>
+  <body
+    style="
+      margin: 0;
+      padding: 0;
+      background-color: #f4f6f9;
+      color: #172033;
+      font-family: Arial,Helvetica,sans-serif;
+    "
+  >
+    <div
+      style="
+        display: none;
+        font-size: 1px;
+        line-height: 1px;
+        max-height: 0;
+        max-width: 0;
+        overflow: hidden;
+        mso-hide: all;
+      "
+    >
+      {{.Preview}}
+    </div>
+    <table
+      role="presentation"
+      width="100%"
+      cellpadding="0"
+      cellspacing="0"
+      style="
+        background-color: #f4f6f9;
+      "
+    >
+      <tr>
+        <td
+          align="center"
+          style="
+            padding: 48px 16px;
+          "
+        >
+          <table
+            role="presentation"
+            width="100%"
+            cellpadding="0"
+            cellspacing="0"
+            style="
+              max-width: 520px;
+            "
+          >
+            <tr>
+              <td
+                style="
+                  padding: 0 0 24px;
+                  font-size: 13px;
+                  font-weight: 700;
+                  letter-spacing: 2px;
+                  color: #536078;
+                "
+              >
+                Рога и Копыта
+              </td>
+            </tr>
+            <tr>
+              <td
+                style="
+                  padding: 36px 28px;
+                  background-color: #ffffff;
+                  border: 1px solid #e5e9f0;
+                  border-radius: 16px;
+                "
+              >
+                <table
+                  role="presentation"
+                  width="100%"
+                  cellpadding="0"
+                  cellspacing="0"
+                >
+                  <tr>
+                    <td>
+                      <div
+                        style="
+                          width: 32px;
+                          height: 4px;
+                          background-color: #4263eb;
+                          border-radius: 2px;
+                        "
+                      >
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td
+                      style="
+                        padding-top: 24px;
+                      "
+                    >
+                      <h1
+                        style="
+                          margin: 0;
+                          font-size: 26px;
+                          line-height: 34px;
+                          font-weight: 700;
+                          letter-spacing: -0.5px;
+                        "
+                      >
+                        {{.Title}}
+                      </h1>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td
+                      style="
+                        padding-top: 14px;
+                        font-size: 15px;
+                        line-height: 24px;
+                        color: #536078;
+                      "
+                    >
+                      {{.Intro}}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td
+                      style="
+                        padding-top: 24px;
+                      "
+                    >
+                      <table
+                        role="presentation"
+                        width="100%"
+                        cellpadding="0"
+                        cellspacing="0"
+                      >
+                        <tr>
+                          <td
+                            style="
+                              padding: 20px 16px;
+                              background-color: #f1f4ff;
+                              border: 1px solid #e0e7ff;
+                              border-radius: 10px;
+                            "
+                          >
+                            <div
+                              style="
+                                font-size: 11px;
+                                line-height: 16px;
+                                font-weight: 700;
+                                letter-spacing: 1.5px;
+                                color: #536078;
+                              "
+                            >
+                              {{.SecretLabel}}
+                            </div>
+                            <div
+                              style="
+                                padding-top: 10px;
+                                font-family: Consolas,'Courier New',monospace;
+                                font-size: {{if .IsCode}}32px{{else}}16px{{end}};
+                                line-height: {{if .IsCode}}42px{{else}}26px{{end}};
+                                font-weight: 700;
+                                letter-spacing: {{if .IsCode}}6px{{else}}0{{end}};
+                                color: #2948c7;
+                                overflow-wrap: anywhere;
+                                word-break: break-all;
+                              "
+                            >
+                              {{.Secret}}
+                            </div>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td
+                      style="
+                        padding-top: 16px;
+                        font-size: 13px;
+                        line-height: 21px;
+                        color: #536078;
+                      "
+                    >
+                      Valid for
+                      <strong>
+                        {{.Validity}}
+                      </strong>
+                      . {{.Instructions}}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td
+                      style="
+                        padding-top: 28px;
+                      "
+                    >
+                      <div
+                        style="
+                          border-top: 1px solid #edf0f5;
+                          padding-top: 20px;
+                          font-size: 13px;
+                          line-height: 21px;
+                          color: #748096;
+                        "
+                      >
+                        {{.Safety}}
+                      </div>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td
+                style="
+                  padding: 22px 4px 0;
+                  font-size: 12px;
+                  line-height: 20px;
+                  color: #748096;
+                "
+              >
+                Automatic security notification.
+                <br>
+                Please do not reply to this email.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

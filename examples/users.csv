@@ -1,0 +1,6 @@
+email,password
+alice@example.test,secret1
+bob@example.test,secret2
+invalid-email,secret3
+short@example.test,12345
+alice@example.test,secret4

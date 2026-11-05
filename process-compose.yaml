@@ -1,0 +1,20 @@
+version: "0.5"
+
+# Подготовка Compose и миграций выполняется make setup до запуска менеджера.
+# Air остаётся единственным наблюдателем за исходниками каждого приложения.
+processes:
+  api:
+    command: "go tool air"
+    availability:
+      exit_on_end: true
+    shutdown:
+      signal: 2
+      timeout_seconds: 30
+
+  worker:
+    command: "go tool air -c .air.worker.toml"
+    availability:
+      exit_on_end: true
+    shutdown:
+      signal: 2
+      timeout_seconds: 30

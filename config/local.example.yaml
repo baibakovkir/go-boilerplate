@@ -1,0 +1,75 @@
+env: local
+
+http_server:
+  address: localhost:8181
+  timeout: 30s
+  idle_timeout: 60s
+  allowed_origins:
+    - http://localhost:8181
+    - http://localhost:5173
+    - http://localhost:3000
+  trusted_proxies: []
+  docs_allowed_cidrs: [] # Пусто — docs доступны всем; пример ограничения: ["127.0.0.1/32"]
+  rate_per_minute: 300
+
+postgres:
+  host: localhost
+  port: 25432
+  user: postgres
+  password: postgres
+  database: boilerplate
+  ssl_mode: disable
+
+redis:
+  address: localhost:26379
+  password: ""
+  db: 0
+  prefix: "boilerplate:"
+
+kafka:
+  brokers: [localhost:29092]
+  topic: boilerplate.jobs.v1
+  group: boilerplate.workers.v1
+
+auth:
+  # Только для local! Для других окружений — случайный секрет минимум 32 байта.
+  jwt_secret: local-development-only-change-this-secret-before-deploy
+  cookie_secure: false
+  issuer: go-boilerplate
+  user_access_ttl: 15m
+  admin_access_ttl: 5m
+  user_refresh_ttl: 720h
+  admin_refresh_ttl: 8h
+  otp_ttl: 5m
+  otp_attempts: 5
+  reset_ttl: 30m
+  login_limit: 10 # На аккаунт за 15 минут; дополнительно действует лимит по IP.
+  email_limit: 3 # Писем восстановления на аккаунт за 15 минут.
+
+smtp:
+  host: localhost
+  port: 21025
+  username: ""
+  password: ""
+  from: noreply@boilerplate.local
+  tls: none # none (только local), starttls или tls
+
+jobs:
+  directory: var/jobs
+  max_rows: 1000000
+  max_upload_bytes: 536870912
+  max_unzip_bytes: 2147483648
+  batch_size: 500
+  hash_workers: 2
+  lease_ttl: 2m
+  max_attempts: 5
+  artifact_ttl: 168h
+
+audit:
+  retention_days: 90
+  schedule: "0 3 * * *" # UTC; раз в месяц: "0 3 1 * *"
+
+# Демонстрационные локальные credentials. make migrate создаёт только отсутствующих.
+admins:
+  - email: admin@example.test
+    password: admin123
