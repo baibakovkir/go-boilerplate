@@ -10,19 +10,19 @@
         <mxCell id="client" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="Клиент / Swagger&#xa;REST + WebSocket" vertex="1">
           <mxGeometry height="110" width="240" x="380" y="290" as="geometry" />
         </mxCell>
-        <mxCell id="api" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="cmd/app → internal/httpapi&#xa;HTTP API (Chi + Huma)&#xa;auth / admin / jobs / realtime" vertex="1">
+        <mxCell id="api" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="cmd/app → internal/httpapi&#xa;HTTP API (Chi + Huma)&#xa;auth / accounts / jobs / readmodel / realtime" vertex="1">
           <mxGeometry height="110" width="360" x="700" y="105" as="geometry" />
         </mxCell>
         <mxCell id="auth" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="internal/auth + security&#xa;Пароли, JWT, refresh, OTP&#xa;CSRF, лимиты, аудит" vertex="1">
           <mxGeometry height="110" width="360" x="1390" y="670" as="geometry" />
         </mxCell>
-        <mxCell id="jobs" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="internal/jobs.Service&#xa;Create / Claim / Heartbeat&#xa;Finish / Publish / файлы" vertex="1">
+        <mxCell id="jobs" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="internal/jobs.Service&#xa;Create / Claim / Heartbeat&#xa;Finish / Publish / S3 cleanup" vertex="1">
           <mxGeometry height="110" width="360" x="1060" y="460" as="geometry" />
         </mxCell>
         <mxCell id="pg" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#d5e8d4;strokeColor=#666666;fontSize=15;spacing=12;" value="PostgreSQL&#xa;users · admin_users · audit_logs&#xa;jobs · job_issues · outbox&#xa;SQL: internal/database + dbgen" vertex="1">
           <mxGeometry height="140" width="360" x="540" y="445" as="geometry" />
         </mxCell>
-        <mxCell id="worker" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="cmd/worker → internal/worker&#xa;Dispatch / Recover / process&#xa;1 задача одновременно на процесс&#xa;Heartbeat + повторы + очистка" vertex="1">
+        <mxCell id="worker" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="cmd/worker → internal/worker&#xa;Dispatch / Recover / process&#xa;jobs.concurrency задач (default 1)&#xa;Heartbeat + повторы + очистка" vertex="1">
           <mxGeometry height="140" width="360" x="70" y="925" as="geometry" />
         </mxCell>
         <mxCell id="kafka" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#ffe6cc;strokeColor=#666666;fontSize=15;spacing=12;" value="Kafka: boilerplate.jobs.v1&#xa;Группа: boilerplate.workers.v1&#xa;key = job UUID; value = job UUID&#xa;Один прикладной топик для import/export" vertex="1">
@@ -34,7 +34,7 @@
         <mxCell id="tasks" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="internal/usertasks&#xa;Import: CSV/XLSX → users&#xa;Export: users → CSV/XLSX" vertex="1">
           <mxGeometry height="110" width="360" x="-60" y="445" as="geometry" />
         </mxCell>
-        <mxCell id="files" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#e1d5e7;strokeColor=#666666;fontSize=15;spacing=12;" value="Общая директория: var/jobs&#xa;source · result · временные файлы&#xa;API и worker должны видеть одни файлы&#xa;Метаданные: jobs.data.files" vertex="1">
+        <mxCell id="files" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#e1d5e7;strokeColor=#666666;fontSize=15;spacing=12;" value="S3: Garage / AWS&#xa;source · result (приватный bucket/prefix)&#xa;Локальные временные файлы каждого процесса&#xa;Метаданные: jobs.data.files" vertex="1">
           <mxGeometry height="130" width="420" x="-20" y="130" as="geometry" />
         </mxCell>
         <mxCell id="smtp" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="internal/mail → SMTP&#xa;OTP администратора&#xa;Сброс пароля" vertex="1">
@@ -114,7 +114,7 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="note" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#666666;fontSize=15;spacing=12;" value="Источник истины заданий — PostgreSQL. Kafka доставляет идентификаторы; worker читает параметры из jobs. Redis Pub/Sub ускоряет уведомления, REST/WS перечитывают состояние из БД.&#xa;Имена Kafka/Redis/директории взяты из config/local.example.yaml и настраиваются." vertex="1">
+        <mxCell id="note" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#666666;fontSize=15;spacing=12;" value="Источник истины заданий — PostgreSQL. Kafka доставляет идентификаторы; worker читает параметры из jobs. Redis Pub/Sub ускоряет уведомления, REST/WS перечитывают состояние из БД.&#xa;Kafka/Redis/S3 настраиваются в config/local.example.yaml. Метрики API :9181, worker :9182." vertex="1">
           <mxGeometry height="100" width="1640" x="30" y="1100" as="geometry" />
         </mxCell>
       </root>
@@ -134,7 +134,7 @@
         <mxCell id="tx" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#d5e8d4;strokeColor=#666666;fontSize=15;spacing=12;" value="3. jobs.Create: одна транзакция&#xa;INSERT jobs (queued)&#xa;INSERT outbox + INSERT audit_logs" vertex="1">
           <mxGeometry height="150" width="340" x="850" y="40" as="geometry" />
         </mxCell>
-        <mxCell id="dispatch" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="4. worker.Dispatch (каждые 3 с)&#xa;SELECT outbox FOR UPDATE&#xa;SKIP LOCKED" vertex="1">
+        <mxCell id="dispatch" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="4. worker → jobs.Dispatch (каждые 3 с)&#xa;SELECT outbox FOR UPDATE&#xa;SKIP LOCKED" vertex="1">
           <mxGeometry height="150" width="340" x="850" y="260" as="geometry" />
         </mxCell>
         <mxCell id="kafka" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#ffe6cc;strokeColor=#666666;fontSize=15;spacing=12;" value="5. Kafka: boilerplate.jobs.v1&#xa;Сообщение: UUID задания&#xa;После ACK: DELETE outbox + COMMIT" vertex="1">
@@ -146,7 +146,7 @@
         <mxCell id="execute" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#dae8fc;strokeColor=#666666;fontSize=15;spacing=12;" value="7. jobs.Execute → usertasks&#xa;Import: валидация, хеш паролей, users&#xa;Export: SELECT users с фильтрами&#xa;Согласованный снимок REPEATABLE READ" vertex="1">
           <mxGeometry height="150" width="340" x="30" y="510" as="geometry" />
         </mxCell>
-        <mxCell id="files" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#e1d5e7;strokeColor=#666666;fontSize=15;spacing=12;" value="8. Файлы var/jobs&#xa;Import: source → обработка / job_issues&#xa;Export: временный → result.csv/xlsx&#xa;Публикация после Finish writer и lease check" vertex="1">
+        <mxCell id="files" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#e1d5e7;strokeColor=#666666;fontSize=15;spacing=12;" value="8. S3 + локальные временные файлы&#xa;Import: S3 → local → обработка / job_issues&#xa;Export: local → уникальный S3-объект попытки&#xa;Ссылка публикуется Finish с проверкой аренды" vertex="1">
           <mxGeometry height="150" width="340" x="430" y="510" as="geometry" />
         </mxCell>
         <mxCell id="finish" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#d5e8d4;strokeColor=#666666;fontSize=15;spacing=12;" value="9. jobs.Finish: транзакция&#xa;Сохранить jobs.data / status / version&#xa;audit_logs; снять lease&#xa;completed / completed_with_errors / failed" vertex="1">
@@ -194,16 +194,16 @@
         <mxCell id="e24" edge="1" parent="1" source="ws" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;endArrow=block;fontSize=13;labelBackgroundColor=#ffffff;" target="download" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="recover" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#666666;fontSize=15;spacing=12;" value="ВОССТАНОВЛЕНИЕ — worker.Recover (15 с)&#xa;queued, пора повторить / running, истёк lease → снова outbox&#xa;Превышен max_attempts → failed + аудит&#xa;Heartbeat продлевает lease каждые lease_ttl / 3&#xa;Временная ошибка → queued + задержка повтора" vertex="1">
+        <mxCell id="recover" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#666666;fontSize=15;spacing=12;" value="ВОССТАНОВЛЕНИЕ — worker → jobs.Recover (15 с)&#xa;queued, пора повторить / running, истёк lease → снова outbox&#xa;Превышен max_attempts → failed + аудит&#xa;Heartbeat продлевает lease каждые lease_ttl / 3&#xa;Временная ошибка → queued + задержка повтора" vertex="1">
           <mxGeometry height="230" width="450" x="1260" y="260" as="geometry" />
         </mxCell>
         <mxCell id="e26" edge="1" parent="1" source="recover" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;endArrow=block;fontSize=13;labelBackgroundColor=#ffffff;dashed=1;" target="tx" value="повторная доставка">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="cleanup" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#666666;fontSize=15;spacing=12;" value="ОЧИСТКА&#xa;Worker: файлы каждый час, аудит по cron&#xa;Сроки и лимиты из конфигурации&#xa;Входные файлы удаляются после завершения задания&#xa;Отчёт ошибок формируется API из job_issues" vertex="1">
+        <mxCell id="cleanup" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#666666;fontSize=15;spacing=12;" value="ОЧИСТКА&#xa;Jobs: S3 и временные файлы каждый час, аудит по cron&#xa;Сроки и лимиты из конфигурации&#xa;Входные файлы удаляются после завершения задания&#xa;Отчёт ошибок формируется API из job_issues" vertex="1">
           <mxGeometry height="180" width="450" x="1260" y="600" as="geometry" />
         </mxCell>
-        <mxCell id="empty" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#666666;fontSize=15;spacing=12;" value="ПРОВЕРЕННЫЙ СЛУЧАЙ ПУСТОГО CSV&#xa;Задание 5c757384-f0ab-44f5-ae1b-a29759077646&#xa;input = {&quot;email&quot;:&quot;string&quot;,&quot;format&quot;:&quot;csv&quot;}&#xa;SQL фильтр: strpos(email, input.Email) &gt; 0&#xa;В БД 2 пользователя; совпадений 0 → completed, result.count = 0&#xa;Файл 39 байт: только заголовок. Уберите email или задайте &quot;&quot;." vertex="1">
+        <mxCell id="empty" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#666666;fontSize=15;spacing=12;" value="ПУСТОЙ ЭКСПОРТ CSV&#xa;SQL-фильтр не находит пользователей → completed&#xa;result.count = 0&#xa;S3-объект содержит только заголовок CSV&#xa;Для экспорта всех пользователей передайте пустой email." vertex="1">
           <mxGeometry height="180" width="1200" x="30" y="1070" as="geometry" />
         </mxCell>
       </root>
@@ -229,7 +229,7 @@
         <mxCell id="outbox" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#d5e8d4;strokeColor=#666666;fontSize=15;spacing=12;" value="outbox&#xa;PK id; FK job_id → jobs.id&#xa;available_at&#xa;Create/Recover: INSERT&#xa;Dispatch: отправка в Kafka → DELETE&#xa;ON DELETE CASCADE" vertex="1">
           <mxGeometry height="180" width="460" x="1130" y="370" as="geometry" />
         </mxCell>
-        <mxCell id="audit" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#d5e8d4;strokeColor=#666666;fontSize=15;spacing=12;" value="audit_logs&#xa;PK id; actor_type / actor_id&#xa;action / object_id / result / request_id&#xa;created_at&#xa;Пишут auth / admin / jobs / worker&#xa;FK на акторов и объекты нет" vertex="1">
+        <mxCell id="audit" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#d5e8d4;strokeColor=#666666;fontSize=15;spacing=12;" value="audit_logs&#xa;PK id; actor_type / actor_id&#xa;action / object_id / result / request_id&#xa;created_at&#xa;Пишут auth / accounts / jobs&#xa;FK на акторов и объекты нет" vertex="1">
           <mxGeometry height="180" width="470" x="540" y="580" as="geometry" />
         </mxCell>
         <mxCell id="sessions" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#f8cecc;strokeColor=#666666;fontSize=15;spacing=12;" value="Redis: boilerplate:session:{sid}&#xa;HASH + TTL: сессия, refresh, CSRF&#xa;Создание / refresh / logout: internal/auth&#xa;JWT проверяется вместе с сессией и аккаунтом" vertex="1">
@@ -256,7 +256,7 @@
         <mxCell id="e15" edge="1" parent="1" source="outbox" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;endArrow=block;fontSize=13;labelBackgroundColor=#ffffff;" target="jobs" value="job_id">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="constraint" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#666666;fontSize=15;spacing=12;" value="У jobs не более одного автора: user либо admin.&#xa;Оба NULL допускаются для системных заданий.&#xa;Файлы — на диске; отдельной таблицы job_files нет.&#xa;Состояние заданий и ошибки — в PostgreSQL, не в Redis." vertex="1">
+        <mxCell id="constraint" parent="1" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff2cc;strokeColor=#666666;fontSize=15;spacing=12;" value="У jobs не более одного автора: user либо admin.&#xa;Оба NULL допускаются для системных заданий.&#xa;Артефакты — в S3; отдельной таблицы job_files нет.&#xa;Состояние заданий и ошибки — в PostgreSQL, не в Redis." vertex="1">
           <mxGeometry height="150" width="460" x="1130" y="620" as="geometry" />
         </mxCell>
       </root>
