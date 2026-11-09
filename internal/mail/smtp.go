@@ -6,7 +6,7 @@ import (
 
 	gomail "github.com/wneessen/go-mail"
 
-	"go-boilerplate/internal/config"
+	appconfig "go-boilerplate/internal/config"
 )
 
 // Sender отделяет прикладную отправку писем от конкретного SMTP-транспорта.
@@ -15,15 +15,15 @@ type Sender interface {
 }
 
 // SMTP отправляет письма с настройками TLS и аутентификации из конфигурации.
-type SMTP struct{ config config.SMTPConfig }
+type SMTP struct{ config appconfig.SMTPConfig }
 
 // New создаёт SMTP-транспорт; соединение устанавливается при отправке письма.
-func New(c config.SMTPConfig) *SMTP { return &SMTP{c} }
+func New(smtp appconfig.SMTPConfig) *SMTP { return &SMTP{smtp} }
 
 // Send отправляет письмо с текстовой и HTML-версиями с ограничением времени и поддержкой отмены контекста.
-func (s *SMTP) Send(ctx context.Context, to, subject string, body Message) error {
-	opts := []gomail.Option{gomail.WithPort(s.config.Port), gomail.WithTimeout(15 * time.Second)}
-	switch s.config.TLS {
+func (smtp *SMTP) Send(ctx context.Context, to, subject string, body Message) error {
+	opts := []gomail.Option{gomail.WithPort(smtp.config.Port), gomail.WithTimeout(15 * time.Second)}
+	switch smtp.config.TLS {
 	case "none":
 		opts = append(opts, gomail.WithTLSPolicy(gomail.NoTLS))
 	case "tls":
@@ -31,24 +31,24 @@ func (s *SMTP) Send(ctx context.Context, to, subject string, body Message) error
 	default:
 		opts = append(opts, gomail.WithTLSPolicy(gomail.TLSMandatory))
 	}
-	if s.config.Username != "" {
+	if smtp.config.Username != "" {
 		opts = append(
 			opts,
 			gomail.WithSMTPAuth(gomail.SMTPAuthPlain),
-			gomail.WithUsername(s.config.Username),
-			gomail.WithPassword(s.config.Password),
+			gomail.WithUsername(smtp.config.Username),
+			gomail.WithPassword(smtp.config.Password),
 		)
 	}
-	client, e := gomail.NewClient(s.config.Host, opts...)
-	if e != nil {
-		return e
+	client, err := gomail.NewClient(smtp.config.Host, opts...)
+	if err != nil {
+		return err
 	}
 	msg := gomail.NewMsg()
-	if e = msg.From(s.config.From); e != nil {
-		return e
+	if err = msg.From(smtp.config.From); err != nil {
+		return err
 	}
-	if e = msg.To(to); e != nil {
-		return e
+	if err = msg.To(to); err != nil {
+		return err
 	}
 	msg.Subject(subject)
 	msg.SetBodyString(gomail.TypeTextPlain, body.Text)

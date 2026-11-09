@@ -10,7 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"go-boilerplate/internal/auth"
-	"go-boilerplate/internal/config"
+	appconfig "go-boilerplate/internal/config"
 	"go-boilerplate/internal/database"
 	"go-boilerplate/internal/httpapi"
 	"go-boilerplate/internal/jobs"
@@ -20,43 +20,45 @@ import (
 )
 
 func main() {
-	if e := run(); e != nil {
-		logger.SetupLogger("prod").Error("application failed", "error", e)
+	if err := run(); err != nil {
+		logger.SetupLogger("prod").Error("application failed", "error", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	c, e := config.Load()
-	if e != nil {
-		return e
+	config, err := appconfig.Load()
+	if err != nil {
+		return err
 	}
-	log := logger.SetupLogger(c.Env)
+	log := logger.SetupLogger(config.Env)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	db, e := database.Open(ctx, c.Postgres)
-	if e != nil {
-		return e
+	db, err := database.Open(ctx, config.Postgres)
+	if err != nil {
+		return err
 	}
 	defer db.Close()
-	r := redis.NewClient(&redis.Options{Addr: c.Redis.Address, Password: c.Redis.Password, DB: c.Redis.DB})
-	defer r.Close()
-	if e = r.Ping(ctx).Err(); e != nil {
-		return e
+	redisClient := redis.NewClient(
+		&redis.Options{Addr: config.Redis.Address, Password: config.Redis.Password, DB: config.Redis.DB},
+	)
+	defer redisClient.Close()
+	if err = redisClient.Ping(ctx).Err(); err != nil {
+		return err
 	}
-	a := auth.New(db, r, c, mail.New(c.SMTP), log)
-	j, e := jobs.New(db, r, c)
-	if e != nil {
-		return e
+	service := auth.New(db, redisClient, config, mail.New(config.SMTP), log)
+	serviceValue, err := jobs.New(db, redisClient, config)
+	if err != nil {
+		return err
 	}
-	if e = usertasks.Register(j); e != nil {
-		return e
+	if err = usertasks.Register(serviceValue); err != nil {
+		return err
 	}
-	server, e := httpapi.New(a, j, c, log)
-	if e != nil {
-		return e
+	server, err := httpapi.New(service, serviceValue, config, log)
+	if err != nil {
+		return err
 	}
 	defer server.Close()
-	log.Info("HTTP server starting", "address", c.HTTPServer.Address, "env", c.Env)
+	log.Info("HTTP server starting", "address", config.HTTPServer.Address, "env", config.Env)
 	return server.Serve(ctx)
 }

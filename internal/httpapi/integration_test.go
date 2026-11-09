@@ -30,7 +30,7 @@ import (
 	"github.com/xuri/excelize/v2"
 
 	"go-boilerplate/internal/auth"
-	"go-boilerplate/internal/config"
+	appconfig "go-boilerplate/internal/config"
 	"go-boilerplate/internal/database"
 	"go-boilerplate/internal/database/dbgen"
 	"go-boilerplate/internal/jobs"
@@ -46,116 +46,124 @@ type captureMail struct {
 	real     appmail.Sender
 }
 
-func (m *captureMail) Send(ctx context.Context, to, subject string, body appmail.Message) error {
-	if e := m.real.Send(ctx, to, subject, body); e != nil {
-		return e
+func (message *captureMail) Send(ctx context.Context, to, subject string, body appmail.Message) error {
+	if err := message.real.Send(ctx, to, subject, body); err != nil {
+		return err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.messages = append(m.messages, body.Text)
+	message.mu.Lock()
+	defer message.mu.Unlock()
+	message.messages = append(message.messages, body.Text)
 	return nil
 }
 
-func (m *captureMail) last() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if len(m.messages) == 0 {
+func (message *captureMail) last() string {
+	message.mu.Lock()
+	defer message.mu.Unlock()
+	if len(message.messages) == 0 {
 		return ""
 	}
-	return m.messages[len(m.messages)-1]
+	return message.messages[len(message.messages)-1]
 }
 
 type lockedLog struct {
-	mu sync.Mutex
-	b  bytes.Buffer
+	mu     sync.Mutex
+	buffer bytes.Buffer
 }
 
-func (l *lockedLog) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
+func (logger *lockedLog) Write(parts []byte) (int, error) {
+	logger.mu.Lock()
+	defer logger.mu.Unlock()
+	return logger.buffer.Write(parts)
 }
-func (l *lockedLog) String() string { l.mu.Lock(); defer l.mu.Unlock(); return l.b.String() }
+
+func (logger *lockedLog) String() string {
+	logger.mu.Lock()
+	defer logger.mu.Unlock()
+	return logger.buffer.String()
+}
 
 func TestIntegration(t *testing.T) {
 	if os.Getenv("RUN_INTEGRATION") != "1" {
 		t.Skip("RUN_INTEGRATION=1 requires project Compose services")
 	}
-	rootPath, e := filepath.Abs("../..")
-	if e != nil {
-		t.Fatal(e)
+	rootPath, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("CONFIG_PATH", filepath.Join(rootPath, "config/local.yaml"))
-	c, e := config.Load()
-	if e != nil {
-		t.Fatal(e)
+	config, err := appconfig.Load()
+	if err != nil {
+		t.Fatal(err)
 	}
 	ctx := context.Background()
-	root, e := pgxpool.New(ctx, c.Postgres.URL())
-	if e != nil {
-		t.Fatal(e)
+	root, err := pgxpool.New(ctx, config.Postgres.URL())
+	if err != nil {
+		t.Fatal(err)
 	}
 	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
 	dbName := "boilerplate_test_" + suffix
-	if _, e = root.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{dbName}.Sanitize()); e != nil {
+	if _, err = root.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{dbName}.Sanitize()); err != nil {
 		root.Close()
-		t.Fatal(e)
+		t.Fatal(err)
 	}
-	c.Postgres.Database = dbName
-	c.Redis.Prefix = "test:" + suffix + ":"
-	c.Kafka.Topic = "test.jobs." + suffix
-	c.Kafka.Group = "test.workers." + suffix
-	c.HTTPServer.Timeout = 15 * time.Second
-	c.HTTPServer.RatePerMinute = 5000
-	c.HTTPServer.AllowedOrigins = []string{"http://allowed.test"}
-	c.Jobs.Directory = t.TempDir()
-	c.Jobs.BatchSize = 2
-	c.Auth.LoginLimit = 100
-	c.Auth.EmailLimit = 10
-	c.Admins = []config.AdminConfig{{Email: "admin@example.test", Password: "admin123"}}
-	if e = database.Migrate(ctx, c.Postgres); e != nil {
-		t.Fatal(e)
+	config.Postgres.Database = dbName
+	config.Redis.Prefix = "test:" + suffix + ":"
+	config.Kafka.Topic = "test.jobs." + suffix
+	config.Kafka.Group = "test.workers." + suffix
+	config.HTTPServer.Timeout = 15 * time.Second
+	config.HTTPServer.RatePerMinute = 5000
+	config.HTTPServer.AllowedOrigins = []string{"http://allowed.test"}
+	config.Jobs.Directory = t.TempDir()
+	config.Jobs.BatchSize = 2
+	config.Auth.LoginLimit = 100
+	config.Auth.EmailLimit = 10
+	config.Admins = []appconfig.AdminConfig{{Email: "admin@example.test", Password: "admin123"}}
+	if err = database.Migrate(ctx, config.Postgres); err != nil {
+		t.Fatal(err)
 	}
-	db, e := database.Open(ctx, c.Postgres)
-	if e != nil {
-		t.Fatal(e)
+	db, err := database.Open(ctx, config.Postgres)
+	if err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		db.Close()
-		_, e := root.Exec(context.Background(), "DROP DATABASE "+pgx.Identifier{dbName}.Sanitize()+" WITH (FORCE)")
-		if e != nil {
-			t.Error(e)
+		_, err := root.Exec(context.Background(), "DROP DATABASE "+pgx.Identifier{dbName}.Sanitize()+" WITH (FORCE)")
+		if err != nil {
+			t.Error(err)
 		}
 		root.Close()
 	})
-	if e = auth.Seed(ctx, db, c.Admins); e != nil {
-		t.Fatal(e)
+	if err = auth.Seed(ctx, db, config.Admins); err != nil {
+		t.Fatal(err)
 	}
-	if e = auth.Seed(ctx, db, []config.AdminConfig{{Email: "admin@example.test", Password: "different123"}}); e != nil {
-		t.Fatal(e)
+	err = auth.Seed(ctx, db, []appconfig.AdminConfig{{Email: "admin@example.test", Password: "different123"}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	r := redis.NewClient(&redis.Options{Addr: c.Redis.Address, Password: c.Redis.Password, DB: c.Redis.DB})
+	redisClient := redis.NewClient(
+		&redis.Options{Addr: config.Redis.Address, Password: config.Redis.Password, DB: config.Redis.DB},
+	)
 	t.Cleanup(func() {
-		keys, _ := r.Keys(context.Background(), c.Redis.Prefix+"*").Result()
+		keys, _ := redisClient.Keys(context.Background(), config.Redis.Prefix+"*").Result()
 		if len(keys) > 0 {
-			r.Del(context.Background(), keys...)
+			redisClient.Del(context.Background(), keys...)
 		}
-		r.Close()
+		redisClient.Close()
 	})
 	logs := &lockedLog{}
 	logger := slog.New(slog.NewJSONHandler(logs, nil))
-	sender := &captureMail{real: appmail.New(c.SMTP)}
-	a := auth.New(db, r, c, sender, logger)
-	j, e := jobs.New(db, r, c)
-	if e != nil {
-		t.Fatal(e)
+	sender := &captureMail{real: appmail.New(config.SMTP)}
+	serviceValue := auth.New(db, redisClient, config, sender, logger)
+	service, err := jobs.New(db, redisClient, config)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if e = usertasks.Register(j); e != nil {
-		t.Fatal(e)
+	if err = usertasks.Register(service); err != nil {
+		t.Fatal(err)
 	}
-	server, e := New(a, j, c, logger)
-	if e != nil {
-		t.Fatal(e)
+	server, err := New(serviceValue, service, config, logger)
+	if err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(server.Close)
 	httpServer := httptest.NewServer(server.Router)
@@ -176,15 +184,15 @@ func TestIntegration(t *testing.T) {
 		if raw, ok := body.([]byte); ok {
 			reader = bytes.NewReader(raw)
 		} else if body != nil {
-			b, e := json.Marshal(body)
-			if e != nil {
-				t.Fatal(e)
+			buffer, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
 			}
-			reader = bytes.NewReader(b)
+			reader = bytes.NewReader(buffer)
 		}
-		req, e := http.NewRequest(method, httpServer.URL+path, reader)
-		if e != nil {
-			t.Fatal(e)
+		req, err := http.NewRequest(method, httpServer.URL+path, reader)
+		if err != nil {
+			t.Fatal(err)
 		}
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -192,8 +200,8 @@ func TestIntegration(t *testing.T) {
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-		for k, v := range headers {
-			req.Header.Set(k, v)
+		for key, value := range headers {
+			req.Header.Set(key, value)
 		}
 		requestClient := client
 		if headers["Cookie"] != "" {
@@ -201,14 +209,14 @@ func TestIntegration(t *testing.T) {
 			copyClient.Jar = nil
 			requestClient = &copyClient
 		}
-		resp, e := requestClient.Do(req)
-		if e != nil {
-			t.Fatal(e)
+		resp, err := requestClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
 		}
 		defer resp.Body.Close()
-		data, e := io.ReadAll(resp.Body)
-		if e != nil {
-			t.Fatal(e)
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
 		}
 		return resp.StatusCode, data, resp.Header
 	}
@@ -221,32 +229,32 @@ func TestIntegration(t *testing.T) {
 		headers map[string]string,
 	) []byte {
 		t.Helper()
-		status, b, _ := request(t, method, path, body, token, headers)
+		status, buffer, _ := request(t, method, path, body, token, headers)
 		if status != want {
-			t.Fatalf("%s %s: expected %d got %d: %s", method, path, want, status, b)
+			t.Fatalf("%s %s: expected %d got %d: %s", method, path, want, status, buffer)
 		}
-		return b
+		return buffer
 	}
-	decodeTokens := func(t *testing.T, b []byte) auth.Tokens {
+	decodeTokens := func(t *testing.T, buffer []byte) auth.Tokens {
 		t.Helper()
-		var v auth.Tokens
-		if e = json.Unmarshal(b, &v); e != nil {
-			t.Fatal(e)
+		var tokens auth.Tokens
+		if err = json.Unmarshal(buffer, &tokens); err != nil {
+			t.Fatal(err)
 		}
-		if v.AccessToken == "" || v.CSRFToken == "" {
+		if tokens.AccessToken == "" || tokens.CSRFToken == "" {
 			t.Fatal("tokens missing")
 		}
-		return v
+		return tokens
 	}
 	t.Run("docs-validation-security", func(t *testing.T) {
-		b := expect(t, 200, "GET", "/openapi.json", nil, "", nil)
-		if bytes.Contains(b, []byte(`"/api/v1/auth/register"`)) {
+		buffer := expect(t, 200, "GET", "/openapi.json", nil, "", nil)
+		if bytes.Contains(buffer, []byte(`"/api/v1/auth/register"`)) {
 			t.Fatal("registration exposed")
 		}
-		if !bytes.Contains(b, []byte(`"users.import"`)) || !bytes.Contains(b, []byte(`"users.export"`)) {
+		if !bytes.Contains(buffer, []byte(`"users.import"`)) || !bytes.Contains(buffer, []byte(`"users.export"`)) {
 			t.Fatal("generated job enums missing from OpenAPI")
 		}
-		if !bytes.Contains(b, []byte(`"minLength":6`)) {
+		if !bytes.Contains(buffer, []byte(`"minLength":6`)) {
 			t.Fatal("password rules missing from OpenAPI")
 		}
 		expect(t, 200, "GET", "/docs", nil, "", nil)
@@ -260,7 +268,7 @@ func TestIntegration(t *testing.T) {
 			"",
 			nil,
 		)
-		b = expect(
+		buffer = expect(
 			t,
 			422,
 			"POST",
@@ -269,7 +277,7 @@ func TestIntegration(t *testing.T) {
 			"",
 			nil,
 		)
-		if bytes.Contains(b, []byte("12345")) {
+		if bytes.Contains(buffer, []byte("12345")) {
 			t.Fatal("password echoed in validation error")
 		}
 		expect(
@@ -310,9 +318,9 @@ func TestIntegration(t *testing.T) {
 			headers.Get("Access-Control-Allow-Credentials") != "true" {
 			t.Fatal("CORS headers missing")
 		}
-		c.HTTPServer.DocsAllowedCIDRs = []string{"203.0.113.0/24"}
+		config.HTTPServer.DocsAllowedCIDRs = []string{"203.0.113.0/24"}
 		expect(t, 403, "GET", "/openapi.json", nil, "", nil)
-		c.HTTPServer.DocsAllowedCIDRs = nil
+		config.HTTPServer.DocsAllowedCIDRs = nil
 	})
 	var admin auth.Tokens
 	t.Run("admin-password-otp", func(t *testing.T) {
@@ -325,7 +333,7 @@ func TestIntegration(t *testing.T) {
 			"",
 			nil,
 		)
-		b := expect(
+		buffer := expect(
 			t,
 			200,
 			"POST",
@@ -337,8 +345,8 @@ func TestIntegration(t *testing.T) {
 		var challenge struct {
 			ChallengeID string `json:"challenge_id"`
 		}
-		if e = json.Unmarshal(b, &challenge); e != nil {
-			t.Fatal(e)
+		if err = json.Unmarshal(buffer, &challenge); err != nil {
+			t.Fatal(err)
 		}
 		code := regexp.MustCompile(`code: ([0-9]{6})`).FindStringSubmatch(sender.last())
 		if len(code) != 2 {
@@ -384,21 +392,21 @@ func TestIntegration(t *testing.T) {
 		t.Fatal("admin login failed")
 	}
 	kafkaAdmin := kadm.NewClient(server.Kafka)
-	create, e := kafkaAdmin.CreateTopics(ctx, 1, 1, nil, c.Kafka.Topic)
-	if e != nil {
-		t.Fatal(e)
+	create, err := kafkaAdmin.CreateTopics(ctx, 1, 1, nil, config.Kafka.Topic)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if e = create.Error(); e != nil {
-		t.Fatal(e)
+	if err = create.Error(); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, _ = kafkaAdmin.DeleteTopics(ctx, c.Kafka.Topic)
+		_, _ = kafkaAdmin.DeleteTopics(ctx, config.Kafka.Topic)
 	})
 	var imported jobs.Snapshot
 	t.Run("queue-upload-and-checkpoint", func(t *testing.T) {
-		b := expect(
+		buffer := expect(
 			t,
 			202,
 			"POST",
@@ -410,26 +418,26 @@ func TestIntegration(t *testing.T) {
 			admin.AccessToken,
 			map[string]string{"Content-Type": "application/octet-stream"},
 		)
-		if e = json.Unmarshal(b, &imported); e != nil {
-			t.Fatal(e)
+		if err = json.Unmarshal(buffer, &imported); err != nil {
+			t.Fatal(err)
 		}
 		var count int
-		if e = db.Pool.QueryRow(ctx,
+		if err = db.Pool.QueryRow(ctx,
 			`
 		SELECT count(*) FROM outbox WHERE job_id=$1
 	`,
-			imported.ID).Scan(&count); e != nil ||
+			imported.ID).Scan(&count); err != nil ||
 			count != 1 {
-			t.Fatal("outbox missing", count, e)
+			t.Fatal("outbox missing", count, err)
 		}
 		// При недоступной Kafka запись outbox должна сохраниться для повторной публикации.
-		offlineConfig := *c
+		offlineConfig := *config
 		offlineConfig.Kafka.Brokers = []string{"127.0.0.1:1"}
-		offlineJobs := *j
+		offlineJobs := *service
 		offlineJobs.Config = &offlineConfig
-		offlineWorker, e := worker.New(&offlineJobs, logger)
-		if e != nil {
-			t.Fatal(e)
+		offlineWorker, err := worker.New(&offlineJobs, logger)
+		if err != nil {
+			t.Fatal(err)
 		}
 		failCtx, stop := context.WithTimeout(ctx, 150*time.Millisecond)
 		publishErr := offlineWorker.Dispatch(failCtx)
@@ -438,50 +446,50 @@ func TestIntegration(t *testing.T) {
 		if publishErr == nil {
 			t.Fatal("offline Kafka unexpectedly accepted a message")
 		}
-		if e = db.Pool.QueryRow(ctx,
+		if err = db.Pool.QueryRow(ctx,
 			`
 		SELECT count(*) FROM outbox WHERE job_id=$1
 	`,
-			imported.ID).Scan(&count); e != nil ||
+			imported.ID).Scan(&count); err != nil ||
 			count != 1 {
-			t.Fatal("outbox lost during Kafka outage", e)
+			t.Fatal("outbox lost during Kafka outage", err)
 		}
 		// Имитируем сохранённый первый пакет и падение worker до подтверждения Kafka-offset.
 		hash, _ := security.HashPassword("secret1")
-		tx, e := db.Pool.Begin(ctx)
-		if e != nil {
-			t.Fatal(e)
+		tx, err := db.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
 		}
 		defer tx.Rollback(ctx)
 		if _,
-			e = tx.Exec(ctx,
+			err = tx.Exec(ctx,
 			`
 		INSERT INTO users(id, email, password_hash) VALUES($1, 'alpha@example.test', $2)
 	`,
 			uuid.New(),
-			hash); e != nil {
-			t.Fatal(e)
+			hash); err != nil {
+			t.Fatal(err)
 		}
 		if _,
-			e = tx.Exec(ctx,
+			err = tx.Exec(ctx,
 			`
 		UPDATE jobs SET total=5, processed=2, succeeded=1, failed=1, data=jsonb_set(data,
 		'{checkpoint}', '{"rows":2}', true) WHERE id=$1
 	`,
-			imported.ID); e != nil {
-			t.Fatal(e)
+			imported.ID); err != nil {
+			t.Fatal(err)
 		}
 		if _,
-			e = tx.Exec(ctx,
+			err = tx.Exec(ctx,
 			`
 		INSERT INTO job_issues(job_id, item_key, code, error) VALUES($1, '3', 'email_exists',
 		'{"row_number":3,"email":"alpha@example.test"}')
 	`,
-			imported.ID); e != nil {
-			t.Fatal(e)
+			imported.ID); err != nil {
+			t.Fatal(err)
 		}
-		if e = tx.Commit(ctx); e != nil {
-			t.Fatal(e)
+		if err = tx.Commit(ctx); err != nil {
+			t.Fatal(err)
 		}
 	})
 	ticketBody := expect(
@@ -496,42 +504,42 @@ func TestIntegration(t *testing.T) {
 	var ticket struct {
 		URL string `json:"url"`
 	}
-	if e = json.Unmarshal(ticketBody, &ticket); e != nil {
-		t.Fatal(e)
+	if err = json.Unmarshal(ticketBody, &ticket); err != nil {
+		t.Fatal(err)
 	}
 	wsCtx, wsCancel := context.WithTimeout(ctx, 60*time.Second)
 	defer wsCancel()
-	conn, _, e := websocket.Dial(wsCtx, "ws"+strings.TrimPrefix(httpServer.URL, "http")+ticket.URL, nil)
-	if e != nil {
-		t.Fatal(e)
+	conn, _, err := websocket.Dial(wsCtx, "ws"+strings.TrimPrefix(httpServer.URL, "http")+ticket.URL, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
 	defer conn.CloseNow()
 	var event struct {
 		Type string        `json:"type"`
 		Job  jobs.Snapshot `json:"job"`
 	}
-	if e = wsjson.Read(wsCtx, conn, &event); e != nil {
-		t.Fatal(e)
+	if err = wsjson.Read(wsCtx, conn, &event); err != nil {
+		t.Fatal(err)
 	}
 	if event.Job.ID != imported.ID {
 		t.Fatal("wrong snapshot")
 	}
-	duplicateConn, resp, e := websocket.Dial(wsCtx, "ws"+strings.TrimPrefix(httpServer.URL, "http")+ticket.URL, nil)
-	if e == nil {
+	duplicateConn, resp, err := websocket.Dial(wsCtx, "ws"+strings.TrimPrefix(httpServer.URL, "http")+ticket.URL, nil)
+	if err == nil {
 		duplicateConn.CloseNow()
 		t.Fatal("ticket reused")
 	}
 	if resp != nil && resp.StatusCode != 401 {
 		t.Fatal(resp.StatusCode)
 	}
-	w, e := worker.New(j, logger)
-	if e != nil {
-		t.Fatal(e)
+	worker, err := worker.New(service, logger)
+	if err != nil {
+		t.Fatal(err)
 	}
 	workerCtx, stopWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
 	var workerErr error
-	go func() { workerErr = w.Run(workerCtx); close(workerDone) }()
+	go func() { workerErr = worker.Run(workerCtx); close(workerDone) }()
 	t.Cleanup(func() {
 		stopWorker()
 		select {
@@ -547,15 +555,15 @@ func TestIntegration(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(60 * time.Second)
 		for time.Now().Before(deadline) {
-			v, e := db.Q.GetJob(ctx, id)
-			if e != nil {
-				t.Fatal(e)
+			job, err := db.Queries.GetJob(ctx, id)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if jobs.Terminal(v.Status) {
-				if v.Status == "failed" {
-					t.Fatalf("job failed: %s; logs: %s", v.ErrorCode, logs.String())
+			if jobs.Terminal(job.Status) {
+				if job.Status == "failed" {
+					t.Fatalf("job failed: %s; logs: %s", job.ErrorCode, logs.String())
 				}
-				return jobs.Public(v)
+				return jobs.Public(job)
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
@@ -569,8 +577,8 @@ func TestIntegration(t *testing.T) {
 			t.Fatal(result)
 		}
 		for !jobs.Terminal(event.Job.Status) {
-			if e = wsjson.Read(wsCtx, conn, &event); e != nil {
-				t.Fatal(e)
+			if err = wsjson.Read(wsCtx, conn, &event); err != nil {
+				t.Fatal(err)
 			}
 		}
 		if event.Job.Processed != 5 {
@@ -592,10 +600,10 @@ func TestIntegration(t *testing.T) {
 		}
 		expect(t, 200, "GET", "/api/v1/admin/jobs/"+imported.ID.String()+"/errors", nil, admin.AccessToken, nil)
 		// Повторная публикация завершённой задачи не должна повторять импорт.
-		if _, e = db.Pool.Exec(ctx, `
+		if _, err = db.Pool.Exec(ctx, `
 		INSERT INTO outbox(job_id) VALUES($1)
-	`, imported.ID); e != nil {
-			t.Fatal(e)
+	`, imported.ID); err != nil {
+			t.Fatal(err)
 		}
 	})
 	var user auth.Tokens
@@ -618,8 +626,8 @@ func TestIntegration(t *testing.T) {
 		expect(t, 200, "GET", "/api/v1/me", nil, user.AccessToken, nil)
 		expect(t, 401, "GET", "/api/v1/admin/users", nil, user.AccessToken, nil)
 		expect(t, 403, "POST", "/api/v1/auth/refresh", nil, "", nil)
-		b := expect(t, 200, "GET", "/api/v1/auth/csrf", nil, "", nil)
-		if !bytes.Contains(b, []byte(user.CSRFToken)) {
+		buffer := expect(t, 200, "GET", "/api/v1/auth/csrf", nil, "", nil)
+		if !bytes.Contains(buffer, []byte(user.CSRFToken)) {
 			t.Fatal("csrf mismatch")
 		}
 		cookieURL, _ := http.NewRequest("GET", httpServer.URL+"/api/v1/auth/refresh", nil)
@@ -646,9 +654,9 @@ func TestIntegration(t *testing.T) {
 		user = loginUser(t, "secret1")
 	})
 	t.Run("block-change-and-reset", func(t *testing.T) {
-		account, e := db.Q.GetUserByEmail(ctx, "alpha@example.test")
-		if e != nil {
-			t.Fatal(e)
+		account, err := db.Queries.GetUserByEmail(ctx, "alpha@example.test")
+		if err != nil {
+			t.Fatal(err)
 		}
 		path := "/api/v1/admin/users/" + account.ID.String()
 		expect(t, 200, "PATCH", path+"/blocked", map[string]bool{"blocked": true}, admin.AccessToken, nil)
@@ -712,15 +720,15 @@ func TestIntegration(t *testing.T) {
 		expect(t, 401, "GET", "/api/v1/me", nil, user.AccessToken, nil)
 	})
 	t.Run("xlsx-import-export-and-safe-views", func(t *testing.T) {
-		x := excelize.NewFile()
-		_ = x.SetSheetRow("Sheet1", "A1", &[]string{"email", "password"})
-		_ = x.SetSheetRow("Sheet1", "A2", &[]string{"gamma@example.test", "secret1"})
-		buf, e := x.WriteToBuffer()
-		if e != nil {
-			t.Fatal(e)
+		workbook := excelize.NewFile()
+		_ = workbook.SetSheetRow("Sheet1", "A1", &[]string{"email", "password"})
+		_ = workbook.SetSheetRow("Sheet1", "A2", &[]string{"gamma@example.test", "secret1"})
+		buf, err := workbook.WriteToBuffer()
+		if err != nil {
+			t.Fatal(err)
 		}
-		x.Close()
-		b := expect(
+		workbook.Close()
+		buffer := expect(
 			t,
 			202,
 			"POST",
@@ -730,13 +738,13 @@ func TestIntegration(t *testing.T) {
 			map[string]string{"Content-Type": "application/octet-stream"},
 		)
 		var job jobs.Snapshot
-		_ = json.Unmarshal(b, &job)
+		_ = json.Unmarshal(buffer, &job)
 		result := waitJob(t, job.ID)
 		if result.Succeeded != 1 {
 			t.Fatal(result)
 		}
 		for _, format := range []string{"csv", "xlsx"} {
-			b = expect(
+			buffer = expect(
 				t,
 				202,
 				"POST",
@@ -745,7 +753,7 @@ func TestIntegration(t *testing.T) {
 				admin.AccessToken,
 				nil,
 			)
-			_ = json.Unmarshal(b, &job)
+			_ = json.Unmarshal(buffer, &job)
 			waitJob(t, job.ID)
 			file := expect(
 				t,
@@ -761,21 +769,21 @@ func TestIntegration(t *testing.T) {
 					t.Fatal("unsafe CSV export")
 				}
 			} else {
-				f, e := excelize.OpenReader(bytes.NewReader(file))
-				if e != nil {
-					t.Fatal(e)
+				workbook, err := excelize.OpenReader(bytes.NewReader(file))
+				if err != nil {
+					t.Fatal(err)
 				}
-				rows, e := f.GetRows("Sheet1")
-				f.Close()
-				if e != nil || len(rows) != 4 {
-					t.Fatal("invalid XLSX export", len(rows), e)
+				rows, err := workbook.GetRows("Sheet1")
+				workbook.Close()
+				if err != nil || len(rows) != 4 {
+					t.Fatal("invalid XLSX export", len(rows), err)
 				}
 			}
 		}
 		for _, table := range []string{"users", "jobs", "audit_logs"} {
-			b = expect(t, 200, "GET", "/api/v1/admin/tables/"+table, nil, admin.AccessToken, nil)
-			if bytes.Contains(b, []byte("password_hash")) || bytes.Contains(b, []byte("source_path")) ||
-				bytes.Contains(b, []byte("secret1")) {
+			buffer = expect(t, 200, "GET", "/api/v1/admin/tables/"+table, nil, admin.AccessToken, nil)
+			if bytes.Contains(buffer, []byte("password_hash")) || bytes.Contains(buffer, []byte("source_path")) ||
+				bytes.Contains(buffer, []byte("secret1")) {
 				t.Fatal("unsafe table projection")
 			}
 		}
@@ -783,44 +791,44 @@ func TestIntegration(t *testing.T) {
 		expect(t, 200, "GET", "/api/v1/admin/kafka", nil, admin.AccessToken, nil)
 	})
 	t.Run("cleanup-and-rate-limit", func(t *testing.T) {
-		_, e = db.Pool.Exec(
+		_, err = db.Pool.Exec(
 			ctx,
 			`
 		INSERT INTO audit_logs(actor_type, action, result, created_at) VALUES('system',
 		'jobs.created', 'success', now()-interval '100 days')
 	`,
 		)
-		if e != nil {
-			t.Fatal(e)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if e = w.CleanupAudit(ctx); e != nil {
-			t.Fatal(e)
+		if err = worker.CleanupAudit(ctx); err != nil {
+			t.Fatal(err)
 		}
 		var count int
-		if e = db.Pool.QueryRow(ctx,
+		if err = db.Pool.QueryRow(ctx,
 			`
 		SELECT count(*) FROM audit_logs WHERE action='jobs.created' AND
 		created_at<now()-interval '90 days'
-	`).Scan(&count); e != nil ||
+	`).Scan(&count); err != nil ||
 			count != 0 {
-			t.Fatal("audit not cleaned", e)
+			t.Fatal("audit not cleaned", err)
 		}
-		_, e = db.Pool.Exec(ctx, `
+		_, err = db.Pool.Exec(ctx, `
 		UPDATE jobs SET updated_at=now()-interval '8 days' WHERE id=$1
 	`, imported.ID)
-		if e != nil {
-			t.Fatal(e)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if e = w.CleanupFiles(ctx); e != nil {
-			t.Fatal(e)
+		if err = worker.CleanupFiles(ctx); err != nil {
+			t.Fatal(err)
 		}
 		expect(t, 410, "GET", "/api/v1/admin/jobs/"+imported.ID.String()+"/report", nil, admin.AccessToken, nil)
-		for n := 0; n < 3; n++ {
-			allowed, e := security.Allow(ctx, r, c.Redis.Prefix, "test-limit", 2, time.Minute)
-			if e != nil {
-				t.Fatal(e)
+		for number := 0; number < 3; number++ {
+			allowed, err := security.Allow(ctx, redisClient, config.Redis.Prefix, "test-limit", 2, time.Minute)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if allowed != (n < 2) {
+			if allowed != (number < 2) {
 				t.Fatal("rate limit failed")
 			}
 		}
@@ -828,42 +836,48 @@ func TestIntegration(t *testing.T) {
 	if os.Getenv("RUN_FULL_LOAD") == "1" {
 		t.Run("million-users-full-pipeline", func(t *testing.T) {
 			// Запускается явно: реальное хеширование миллиона паролей может занять часы.
-			c.Jobs.BatchSize = 500
-			fixture, e := os.CreateTemp(t.TempDir(), "million-*.csv")
-			if e != nil {
-				t.Fatal(e)
+			config.Jobs.BatchSize = 500
+			fixture, err := os.CreateTemp(t.TempDir(), "million-*.csv")
+			if err != nil {
+				t.Fatal(err)
 			}
 			writer := csv.NewWriter(fixture)
 			_ = writer.Write([]string{"email", "password"})
-			for n := 0; n < 1000000; n++ {
-				if e = writer.Write([]string{fmt.Sprintf("load%d@load.test", n), "secret123"}); e != nil {
-					t.Fatal(e)
+			for number := 0; number < 1000000; number++ {
+				if err = writer.Write([]string{fmt.Sprintf("load%d@load.test", number), "secret123"}); err != nil {
+					t.Fatal(err)
 				}
 			}
 			writer.Flush()
-			if e = writer.Error(); e != nil {
-				t.Fatal(e)
+			if err = writer.Error(); err != nil {
+				t.Fatal(err)
 			}
-			if _, e = fixture.Seek(0, 0); e != nil {
-				t.Fatal(e)
+			if _, err = fixture.Seek(0, 0); err != nil {
+				t.Fatal(err)
 			}
-			actor, e := db.Q.GetAdminByEmail(ctx, "admin@example.test")
-			if e != nil {
-				t.Fatal(e)
+			actor, err := db.Queries.GetAdminByEmail(ctx, "admin@example.test")
+			if err != nil {
+				t.Fatal(err)
 			}
 			started := time.Now()
-			load, e := usertasks.CreateImport(ctx, j, jobs.Actor{AdminID: &actor.ID}, dbgen.FileFormatCsv, fixture)
+			load, err := usertasks.CreateImport(
+				ctx,
+				service,
+				jobs.Actor{AdminID: &actor.ID},
+				dbgen.FileFormatCsv,
+				fixture,
+			)
 			fixture.Close()
-			if e != nil {
-				t.Fatal(e)
+			if err != nil {
+				t.Fatal(err)
 			}
 			deadline := time.Now().Add(11 * time.Hour)
 			var peak uint64
 			var reported int64
 			for time.Now().Before(deadline) {
-				state, e := db.Q.GetJob(ctx, load.ID)
-				if e != nil {
-					t.Fatal(e)
+				state, err := db.Queries.GetJob(ctx, load.ID)
+				if err != nil {
+					t.Fatal(err)
 				}
 				var memory runtime.MemStats
 				runtime.ReadMemStats(&memory)
@@ -888,48 +902,49 @@ func TestIntegration(t *testing.T) {
 	t.Run("generic-kernel-actors-and-ownership", func(t *testing.T) {
 		stopWorker()
 		<-workerDone
-		kernel, e := jobs.New(db, r, c)
-		if e != nil {
-			t.Fatal(e)
+		kernel, errValue := jobs.New(db, redisClient, config)
+		if errValue != nil {
+			t.Fatal(errValue)
 		}
-		if e = kernel.Register(dbgen.JobTypeUsersexport, func(ctx context.Context, job dbgen.Job, owner string) error {
-			data, err := jobs.Decode(job)
-			if err != nil {
-				return err
-			}
-			var input struct {
-				Steps int `json:"steps"`
-			}
-			if err = json.Unmarshal(data.Input, &input); err != nil {
-				return err
-			}
-			if len(data.Files) != 0 || input.Steps != 2 {
-				return fmt.Errorf("unexpected generic payload")
-			}
-			if _,
-				err = kernel.DB.Pool.Exec(ctx,
-				`
+		if errValue = kernel.Register(
+			dbgen.JobTypeUsersexport, func(ctx context.Context, job dbgen.Job, owner string) error {
+				data, err := jobs.Decode(job)
+				if err != nil {
+					return err
+				}
+				var input struct {
+					Steps int `json:"steps"`
+				}
+				if err = json.Unmarshal(data.Input, &input); err != nil {
+					return err
+				}
+				if len(data.Files) != 0 || input.Steps != 2 {
+					return fmt.Errorf("unexpected generic payload")
+				}
+				if _,
+					err = kernel.DB.Pool.Exec(ctx,
+					`
 		UPDATE jobs SET total=2, processed=2, succeeded=2 WHERE id=$1
 	`,
-				job.ID); err != nil {
-				return err
-			}
-			data.Result = json.RawMessage(`{"done":true}`)
-			return kernel.Finish(ctx, job.ID, owner, dbgen.JobStatusCompleted, &data, dbgen.JobErrorCodeNone)
-		}); e != nil {
-			t.Fatal(e)
+					job.ID); err != nil {
+					return err
+				}
+				data.Result = json.RawMessage(`{"done":true}`)
+				return kernel.Finish(ctx, job.ID, owner, dbgen.JobStatusCompleted, &data, dbgen.JobErrorCodeNone)
+			}); errValue != nil {
+			t.Fatal(errValue)
 		}
-		alpha, e := db.Q.GetUserByEmail(ctx, "alpha@example.test")
-		if e != nil {
-			t.Fatal(e)
+		alpha, errValue := db.Queries.GetUserByEmail(ctx, "alpha@example.test")
+		if errValue != nil {
+			t.Fatal(errValue)
 		}
-		beta, e := db.Q.GetUserByEmail(ctx, "beta@example.test")
-		if e != nil {
-			t.Fatal(e)
+		beta, errValue := db.Queries.GetUserByEmail(ctx, "beta@example.test")
+		if errValue != nil {
+			t.Fatal(errValue)
 		}
-		adminRow, e := db.Q.GetAdminByEmail(ctx, "admin@example.test")
-		if e != nil {
-			t.Fatal(e)
+		adminRow, errValue := db.Queries.GetAdminByEmail(ctx, "admin@example.test")
+		if errValue != nil {
+			t.Fatal(errValue)
 		}
 		var ownID uuid.UUID
 		for _, actor := range []jobs.Actor{{UserID: &alpha.ID}, {AdminID: &adminRow.ID}, {}} {
@@ -952,7 +967,7 @@ func TestIntegration(t *testing.T) {
 			if err = kernel.Execute(ctx, job, owner); err != nil {
 				t.Fatal(err)
 			}
-			completed, err := db.Q.GetJob(ctx, snapshot.ID)
+			completed, err := db.Queries.GetJob(ctx, snapshot.ID)
 			if err != nil || completed.Status != dbgen.JobStatusCompleted {
 				t.Fatal("generic handler failed", err)
 			}
@@ -1024,8 +1039,8 @@ func TestIntegration(t *testing.T) {
 				"",
 				nil))
 		path := "/api/v1/jobs/" + ownID.String()
-		b := expect(t, 200, "GET", path, nil, alphaToken.AccessToken, nil)
-		if bytes.Contains(b, []byte("steps")) || bytes.Contains(b, []byte("checkpoint")) {
+		buffer := expect(t, 200, "GET", path, nil, alphaToken.AccessToken, nil)
+		if bytes.Contains(buffer, []byte("steps")) || bytes.Contains(buffer, []byte("checkpoint")) {
 			t.Fatal("private data exposed")
 		}
 		expect(t, 404, "GET", path, nil, betaToken.AccessToken, nil)
@@ -1053,11 +1068,11 @@ func TestIntegration(t *testing.T) {
 			details); err != nil {
 			t.Fatal(err)
 		}
-		b = expect(t, 200, "GET", path+"/errors", nil, alphaToken.AccessToken, nil)
-		if !bytes.Contains(b, []byte("part-a")) || bytes.Contains(b, []byte("row_number")) {
+		buffer = expect(t, 200, "GET", path+"/errors", nil, alphaToken.AccessToken, nil)
+		if !bytes.Contains(buffer, []byte("part-a")) || bytes.Contains(buffer, []byte("row_number")) {
 			t.Fatal("issue context is not generic")
 		}
-		b = expect(t,
+		buffer = expect(t,
 			200,
 			"POST",
 			"/api/v1/ws-tickets",
@@ -1069,7 +1084,7 @@ func TestIntegration(t *testing.T) {
 		var ownTicket struct {
 			URL string `json:"url"`
 		}
-		if err := json.Unmarshal(b, &ownTicket); err != nil {
+		if err := json.Unmarshal(buffer, &ownTicket); err != nil {
 			t.Fatal(err)
 		}
 		wsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

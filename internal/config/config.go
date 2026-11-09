@@ -49,17 +49,17 @@ type PostgresConfig struct {
 }
 
 // URL собирает строку подключения с экранированием имени и пароля.
-func (p PostgresConfig) URL() string {
-	u := url.URL{
+func (config PostgresConfig) URL() string {
+	parsedURL := url.URL{
 		Scheme: "postgres",
-		Host:   net.JoinHostPort(p.Host, strconv.Itoa(int(p.Port))),
-		Path:   "/" + p.Database,
-		User:   url.UserPassword(p.User, p.Password),
+		Host:   net.JoinHostPort(config.Host, strconv.Itoa(int(config.Port))),
+		Path:   "/" + config.Database,
+		User:   url.UserPassword(config.User, config.Password),
 	}
-	q := u.Query()
-	q.Set("sslmode", p.SSLMode)
-	u.RawQuery = q.Encode()
-	return u.String()
+	queries := parsedURL.Query()
+	queries.Set("sslmode", config.SSLMode)
+	parsedURL.RawQuery = queries.Encode()
+	return parsedURL.String()
 }
 
 // RedisConfig настраивает хранилище сессий, лимитов и уведомлений.
@@ -130,83 +130,85 @@ type AdminConfig struct {
 
 // Load читает YAML, применяет окружение и значения по умолчанию, затем проверяет настройки.
 func Load() (*Config, error) {
-	p := os.Getenv("CONFIG_PATH")
-	if p == "" {
-		p = "config/local.yaml"
+	parts := os.Getenv("CONFIG_PATH")
+	if parts == "" {
+		parts = "config/local.yaml"
 	}
-	var c Config
-	if err := cleanenv.ReadConfig(p, &c); err != nil {
-		return nil, fmt.Errorf("read config %q: %w", p, err)
+	var config Config
+	if err := cleanenv.ReadConfig(parts, &config); err != nil {
+		return nil, fmt.Errorf("read config %q: %w", parts, err)
 	}
-	if err := c.Validate(); err != nil {
+	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	return &c, nil
+	return &config, nil
 }
 
 // Validate отклоняет небезопасные или некорректные настройки до запуска зависимостей.
-func (c *Config) Validate() error {
-	if _, e := cron.ParseStandard(c.Audit.Schedule); e != nil {
-		return fmt.Errorf("invalid audit.schedule: %w", e)
+func (config *Config) Validate() error {
+	if _, err := cron.ParseStandard(config.Audit.Schedule); err != nil {
+		return fmt.Errorf("invalid audit.schedule: %w", err)
 	}
-	if len(c.Auth.JWTSecret) < 32 {
+	if len(config.Auth.JWTSecret) < 32 {
 		return fmt.Errorf("auth.jwt_secret must contain at least 32 bytes")
 	}
-	if c.Env != "local" && strings.HasPrefix(c.Auth.JWTSecret, "local-development-") {
+	if config.Env != "local" && strings.HasPrefix(config.Auth.JWTSecret, "local-development-") {
 		return fmt.Errorf("replace the example JWT secret outside local")
 	}
-	if c.Env != "local" && !c.Auth.CookieSecure {
+	if config.Env != "local" && !config.Auth.CookieSecure {
 		return fmt.Errorf("auth.cookie_secure must be true outside local")
 	}
-	if c.Env != "local" && c.SMTP.TLS == "none" {
+	if config.Env != "local" && config.SMTP.TLS == "none" {
 		return fmt.Errorf("SMTP TLS is required outside local")
 	}
-	if c.SMTP.TLS != "none" && c.SMTP.TLS != "starttls" && c.SMTP.TLS != "tls" {
+	if config.SMTP.TLS != "none" && config.SMTP.TLS != "starttls" && config.SMTP.TLS != "tls" {
 		return fmt.Errorf("smtp.tls must be none, starttls or tls")
 	}
-	if c.HTTPServer.RatePerMinute < 1 || c.Jobs.BatchSize < 1 || c.Jobs.BatchSize > 5000 || c.Jobs.HashWorkers < 1 ||
-		c.Jobs.HashWorkers > 32 ||
-		c.Jobs.MaxRows < 1 ||
-		c.Jobs.MaxRows > 1000000 ||
-		c.Jobs.MaxUploadBytes < 1 ||
-		c.Jobs.MaxUnzipBytes < 1 ||
-		c.Jobs.MaxAttempts < 1 ||
-		c.Auth.OTPAttempts < 1 ||
-		c.Auth.OTPAttempts > 10 ||
-		c.Auth.LoginLimit < 1 ||
-		c.Auth.EmailLimit < 1 ||
-		c.Audit.RetentionDays < 1 {
+	if config.HTTPServer.RatePerMinute < 1 || config.Jobs.BatchSize < 1 || config.Jobs.BatchSize > 5000 ||
+		config.Jobs.HashWorkers < 1 ||
+		config.Jobs.HashWorkers > 32 ||
+		config.Jobs.MaxRows < 1 ||
+		config.Jobs.MaxRows > 1000000 ||
+		config.Jobs.MaxUploadBytes < 1 ||
+		config.Jobs.MaxUnzipBytes < 1 ||
+		config.Jobs.MaxAttempts < 1 ||
+		config.Auth.OTPAttempts < 1 ||
+		config.Auth.OTPAttempts > 10 ||
+		config.Auth.LoginLimit < 1 ||
+		config.Auth.EmailLimit < 1 ||
+		config.Audit.RetentionDays < 1 {
 		return fmt.Errorf("invalid numeric limits")
 	}
-	for _, d := range []time.Duration{
-		c.HTTPServer.Timeout,
-		c.HTTPServer.IdleTimeout,
-		c.Auth.UserAccessTTL,
-		c.Auth.AdminAccessTTL,
-		c.Auth.UserRefreshTTL,
-		c.Auth.AdminRefreshTTL,
-		c.Auth.OTPTTL,
-		c.Auth.ResetTTL,
-		c.Jobs.ArtifactTTL,
+	for _, data := range []time.Duration{
+		config.HTTPServer.Timeout,
+		config.HTTPServer.IdleTimeout,
+		config.Auth.UserAccessTTL,
+		config.Auth.AdminAccessTTL,
+		config.Auth.UserRefreshTTL,
+		config.Auth.AdminRefreshTTL,
+		config.Auth.OTPTTL,
+		config.Auth.ResetTTL,
+		config.Jobs.ArtifactTTL,
 	} {
-		if d <= 0 {
+		if data <= 0 {
 			return fmt.Errorf("durations must be positive")
 		}
 	}
-	if c.Jobs.LeaseTTL < 30*time.Second {
+	if config.Jobs.LeaseTTL < 30*time.Second {
 		return fmt.Errorf("jobs.lease_ttl must be at least 30s")
 	}
-	for _, list := range [][]string{c.HTTPServer.TrustedProxies, c.HTTPServer.DocsAllowedCIDRs} {
-		for _, v := range list {
-			if _, _, e := net.ParseCIDR(v); e != nil {
-				return fmt.Errorf("invalid CIDR %q", v)
+	for _, list := range [][]string{config.HTTPServer.TrustedProxies, config.HTTPServer.DocsAllowedCIDRs} {
+		for _, value := range list {
+			if _, _, err := net.ParseCIDR(value); err != nil {
+				return fmt.Errorf("invalid CIDR %q", value)
 			}
 		}
 	}
-	for _, origin := range c.HTTPServer.AllowedOrigins {
-		u, e := url.Parse(origin)
-		if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.Path != "" ||
-			u.RawQuery != "" ||
+	for _, origin := range config.HTTPServer.AllowedOrigins {
+		parsedURL, err := url.Parse(origin)
+		if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") ||
+			parsedURL.Path != "" ||
+			parsedURL.RawQuery != "" ||
 			strings.Contains(origin, "*") {
 			return fmt.Errorf("invalid allowed origin %q", origin)
 		}

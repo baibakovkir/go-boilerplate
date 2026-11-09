@@ -15,7 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"go-boilerplate/internal/auth"
-	"go-boilerplate/internal/config"
+	appconfig "go-boilerplate/internal/config"
 	"go-boilerplate/internal/database"
 	"go-boilerplate/internal/database/dbgen"
 )
@@ -38,27 +38,27 @@ type Data struct {
 }
 
 // Decode проверяет общий контейнер и метаданные файлов; вход проверяет сам обработчик.
-func Decode(j dbgen.Job) (Data, error) {
-	var d Data
-	if err := json.Unmarshal(j.Data, &d); err != nil {
-		return d, Permanent(dbgen.JobErrorCodeInvalidPayload)
+func Decode(job dbgen.Job) (Data, error) {
+	var data Data
+	if err := json.Unmarshal(job.Data, &data); err != nil {
+		return data, Permanent(dbgen.JobErrorCodeInvalidPayload)
 	}
-	for _, f := range d.Files {
-		if !f.Role.Valid() || !f.Format.Valid() || f.Key == "" || filepath.Base(f.Key) != f.Key ||
-			strings.ContainsAny(f.Key,
+	for _, file := range data.Files {
+		if !file.Role.Valid() || !file.Format.Valid() || file.Key == "" || filepath.Base(file.Key) != file.Key ||
+			strings.ContainsAny(file.Key,
 				"/\\") {
 
-			return d, Permanent(dbgen.JobErrorCodeInvalidPayload)
+			return data, Permanent(dbgen.JobErrorCodeInvalidPayload)
 		}
 	}
-	return d, nil
+	return data, nil
 }
 
 // FindFile выбирает файл по роли без привязки к импорту или экспорту.
-func (d Data) FindFile(role dbgen.JobFileRole) (File, bool) {
-	for _, f := range d.Files {
-		if f.Role == role {
-			return f, true
+func (data Data) FindFile(role dbgen.JobFileRole) (File, bool) {
+	for _, file := range data.Files {
+		if file.Role == role {
+			return file, true
 		}
 	}
 	return File{}, false
@@ -71,28 +71,29 @@ type Actor struct {
 }
 
 // ForPrincipal создаёт автора из проверенной сессии, а не из данных HTTP-клиента.
-func ForPrincipal(p *auth.Principal) Actor {
-	if p.Role == auth.Admin {
-		return Actor{AdminID: &p.ID}
+func ForPrincipal(principal *auth.Principal) Actor {
+	if principal.Role == auth.Admin {
+		return Actor{AdminID: &principal.ID}
 	}
-	return Actor{UserID: &p.ID}
+	return Actor{UserID: &principal.ID}
 }
 
 // Identity возвращает тип и идентификатор для общего аудита.
-func (a Actor) Identity() (dbgen.ActorType, string) {
-	if a.AdminID != nil {
-		return dbgen.ActorTypeAdmin, a.AdminID.String()
+func (actor Actor) Identity() (dbgen.ActorType, string) {
+	if actor.AdminID != nil {
+		return dbgen.ActorTypeAdmin, actor.AdminID.String()
 	}
-	if a.UserID != nil {
-		return dbgen.ActorTypeUser, a.UserID.String()
+	if actor.UserID != nil {
+		return dbgen.ActorTypeUser, actor.UserID.String()
 	}
 	return dbgen.ActorTypeSystem, ""
 }
 
 // CanRead разрешает администратору общий просмотр, пользователю — только собственную задачу.
-func CanRead(j dbgen.Job, p *auth.Principal) bool {
-	return p != nil &&
-		(p.Role == auth.Admin || (p.Role == auth.User && j.CreatedByUserID != nil && *j.CreatedByUserID == p.ID))
+func CanRead(job dbgen.Job, principal *auth.Principal) bool {
+	return principal != nil &&
+		(principal.Role == auth.Admin ||
+			(principal.Role == auth.User && job.CreatedByUserID != nil && *job.CreatedByUserID == principal.ID))
 }
 
 // Snapshot — единое публичное состояние для всех типов задач, REST и WebSocket.
@@ -117,30 +118,30 @@ type Snapshot struct {
 }
 
 // Public не раскрывает вход, контрольную позицию, ключи файлов и параметры аренды.
-func Public(j dbgen.Job) Snapshot {
-	d, _ := Decode(j)
-	s := Snapshot{
-		ID:               j.ID,
-		Type:             j.Type,
-		Status:           j.Status,
-		CreatedByUserID:  j.CreatedByUserID,
-		CreatedByAdminID: j.CreatedByAdminID,
-		Processed:        j.Processed,
-		Succeeded:        j.Succeeded,
-		Failed:           j.Failed,
-		Total:            j.Total,
-		Version:          j.Version,
-		Attempts:         j.Attempts,
-		Result:           d.Result,
-		ArtifactsExpired: j.ArtifactsExpired,
-		CreatedAt:        j.CreatedAt,
-		UpdatedAt:        j.UpdatedAt,
+func Public(job dbgen.Job) Snapshot {
+	data, _ := Decode(job)
+	value := Snapshot{
+		ID:               job.ID,
+		Type:             job.Type,
+		Status:           job.Status,
+		CreatedByUserID:  job.CreatedByUserID,
+		CreatedByAdminID: job.CreatedByAdminID,
+		Processed:        job.Processed,
+		Succeeded:        job.Succeeded,
+		Failed:           job.Failed,
+		Total:            job.Total,
+		Version:          job.Version,
+		Attempts:         job.Attempts,
+		Result:           data.Result,
+		ArtifactsExpired: job.ArtifactsExpired,
+		CreatedAt:        job.CreatedAt,
+		UpdatedAt:        job.UpdatedAt,
 	}
-	if j.ErrorCode != dbgen.JobErrorCodeNone {
-		s.ErrorCode = &j.ErrorCode
-		s.Error = j.Error
+	if job.ErrorCode != dbgen.JobErrorCodeNone {
+		value.ErrorCode = &job.ErrorCode
+		value.Error = job.Error
 	}
-	return s
+	return value
 }
 
 // Terminal отличает окончательное состояние от ожидания и обработки.
@@ -156,58 +157,58 @@ type Handler func(context.Context, dbgen.Job, string) error
 type Service struct {
 	DB       *database.Store
 	Redis    *redis.Client
-	Config   *config.Config
+	Config   *appconfig.Config
 	handlers map[dbgen.JobType]Handler
 }
 
 // New подготавливает файловое хранилище и пустой реестр обработчиков.
-func New(db *database.Store, r *redis.Client, c *config.Config) (*Service, error) {
-	dir, err := filepath.Abs(c.Jobs.Directory)
+func New(db *database.Store, redisClient *redis.Client, config *appconfig.Config) (*Service, error) {
+	dir, err := filepath.Abs(config.Jobs.Directory)
 	if err != nil {
 		return nil, err
 	}
-	c.Jobs.Directory = dir
+	config.Jobs.Directory = dir
 	if err = os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Service{DB: db, Redis: r, Config: c, handlers: make(map[dbgen.JobType]Handler)}, nil
+	return &Service{DB: db, Redis: redisClient, Config: config, handlers: make(map[dbgen.JobType]Handler)}, nil
 }
 
 // Register вызывается до старта HTTP и worker; повторная регистрация — ошибка конфигурации.
-func (s *Service) Register(kind dbgen.JobType, handler Handler) error {
+func (service *Service) Register(kind dbgen.JobType, handler Handler) error {
 	if !kind.Valid() || handler == nil {
 		return fmt.Errorf("invalid job handler")
 	}
-	if _, exists := s.handlers[kind]; exists {
+	if _, exists := service.handlers[kind]; exists {
 		return fmt.Errorf("duplicate job handler: %s", kind)
 	}
-	s.handlers[kind] = handler
+	service.handlers[kind] = handler
 	return nil
 }
 
 // Execute выбирает зарегистрированный обработчик без неявного запасного варианта.
-func (s *Service) Execute(ctx context.Context, j dbgen.Job, owner string) error {
-	handler, ok := s.handlers[j.Type]
+func (service *Service) Execute(ctx context.Context, job dbgen.Job, owner string) error {
+	handler, ok := service.handlers[job.Type]
 	if !ok {
 		return Permanent(dbgen.JobErrorCodeUnknownType)
 	}
-	if _, err := Decode(j); err != nil {
+	if _, err := Decode(job); err != nil {
 		return err
 	}
-	return handler(ctx, j, owner)
+	return handler(ctx, job, owner)
 }
 
 // Path ограничивает доступ серверным именем внутри директории задач.
-func (s *Service) Path(name string) (string, error) {
+func (service *Service) Path(name string) (string, error) {
 	if name == "" || filepath.Base(name) != name || strings.ContainsAny(name, "/\\") {
 		return "", fmt.Errorf("invalid artifact name")
 	}
-	return filepath.Join(s.Config.Jobs.Directory, name), nil
+	return filepath.Join(service.Config.Jobs.Directory, name), nil
 }
 
 // Create фиксирует задачу, аудит и outbox одной транзакцией для любого автора.
 // Разрешение запускать конкретную операцию проверяет её прикладной endpoint.
-func (s *Service) Create(ctx context.Context,
+func (service *Service) Create(ctx context.Context,
 	id uuid.UUID,
 	actor Actor,
 	kind dbgen.JobType,
@@ -217,7 +218,7 @@ func (s *Service) Create(ctx context.Context,
 	if actor.UserID != nil && actor.AdminID != nil {
 		return Snapshot{}, fmt.Errorf("job has multiple actors")
 	}
-	if _, ok := s.handlers[kind]; !kind.Valid() || !ok {
+	if _, ok := service.handlers[kind]; !kind.Valid() || !ok {
 		return Snapshot{}, Permanent(dbgen.JobErrorCodeUnknownType)
 	}
 	raw, err := json.Marshal(data)
@@ -227,7 +228,7 @@ func (s *Service) Create(ctx context.Context,
 	if _, err = Decode(dbgen.Job{Data: raw}); err != nil {
 		return Snapshot{}, err
 	}
-	tx, err := s.DB.Pool.Begin(ctx)
+	tx, err := service.DB.Pool.Begin(ctx)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -252,8 +253,8 @@ func (s *Service) Create(ctx context.Context,
 		return Snapshot{}, err
 	}
 	role, actorID := actor.Identity()
-	q := dbgen.New(tx)
-	if err = q.InsertAudit(ctx,
+	queries := dbgen.New(tx)
+	if err = queries.InsertAudit(ctx,
 		dbgen.InsertAuditParams{
 			ActorType: role,
 			ActorID:   actorID,
@@ -264,32 +265,32 @@ func (s *Service) Create(ctx context.Context,
 		}); err != nil {
 		return Snapshot{}, err
 	}
-	j, err := q.GetJob(ctx, id)
+	job, err := queries.GetJob(ctx, id)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return Snapshot{}, err
 	}
-	return Public(j), nil
+	return Public(job), nil
 }
 
 // Publish уведомляет клиентов; потеря Pub/Sub не меняет сохранённое состояние.
-func (s *Service) Publish(ctx context.Context, id uuid.UUID) error {
-	j, err := s.DB.Q.GetJob(ctx, id)
+func (service *Service) Publish(ctx context.Context, id uuid.UUID) error {
+	job, err := service.DB.Queries.GetJob(ctx, id)
 	if err != nil {
 		return err
 	}
-	raw, err := json.Marshal(Public(j))
+	raw, err := json.Marshal(Public(job))
 	if err != nil {
 		return err
 	}
-	return s.Redis.Publish(ctx, s.Config.Redis.Prefix+"job:"+id.String(), raw).Err()
+	return service.Redis.Publish(ctx, service.Config.Redis.Prefix+"job:"+id.String(), raw).Err()
 }
 
 // Claim захватывает готовую задачу или задачу с истёкшей арендой.
-func (s *Service) Claim(ctx context.Context, id uuid.UUID, owner string) (dbgen.Job, error) {
-	tx, err := s.DB.Pool.Begin(ctx)
+func (service *Service) Claim(ctx context.Context, id uuid.UUID, owner string) (dbgen.Job, error) {
+	tx, err := service.DB.Pool.Begin(ctx)
 	if err != nil {
 		return dbgen.Job{}, err
 	}
@@ -304,35 +305,35 @@ func (s *Service) Claim(ctx context.Context, id uuid.UUID, owner string) (dbgen.
 	`,
 		id,
 		owner,
-		s.Config.Jobs.LeaseTTL.String(),
-		s.Config.Jobs.MaxAttempts)
+		service.Config.Jobs.LeaseTTL.String(),
+		service.Config.Jobs.MaxAttempts)
 	if err != nil {
 		return dbgen.Job{}, err
 	}
 	if tag.RowsAffected() == 0 {
 		return dbgen.Job{}, pgx.ErrNoRows
 	}
-	j, err := dbgen.New(tx).GetJob(ctx, id)
+	job, err := dbgen.New(tx).GetJob(ctx, id)
 	if err != nil {
 		return dbgen.Job{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return dbgen.Job{}, err
 	}
-	return j, nil
+	return job, nil
 }
 
 // Heartbeat не позволяет устаревшему владельцу продлить чужую аренду.
-func (s *Service) Heartbeat(ctx context.Context, id uuid.UUID, owner string) error {
+func (service *Service) Heartbeat(ctx context.Context, id uuid.UUID, owner string) error {
 	tag,
-		err := s.DB.Pool.Exec(ctx,
+		err := service.DB.Pool.Exec(ctx,
 		`
 		UPDATE jobs SET lease_until=now()+$3::interval WHERE id=$1 AND lease_owner=$2 AND
 		status='running'
 	`,
 		id,
 		owner,
-		s.Config.Jobs.LeaseTTL.String())
+		service.Config.Jobs.LeaseTTL.String())
 	if err != nil {
 		return err
 	}
@@ -347,22 +348,22 @@ var ErrLeaseLost = errors.New("job lease lost")
 
 type permanent struct{ code dbgen.JobErrorCode }
 
-func (e permanent) Error() string { return string(e.code) }
+func (err permanent) Error() string { return string(err.code) }
 
 // Permanent помечает ошибку данных, которую повтор не исправит.
 func Permanent(code dbgen.JobErrorCode) error { return permanent{code} }
 
 // PermanentCode извлекает типизированный код окончательной ошибки.
 func PermanentCode(err error) (dbgen.JobErrorCode, bool) {
-	var p permanent
-	if errors.As(err, &p) {
-		return p.code, true
+	var parts permanent
+	if errors.As(err, &parts) {
+		return parts.code, true
 	}
 	return dbgen.JobErrorCodeNone, false
 }
 
 // Finish сохраняет результат и аудит в транзакции. Данные файлов остаются закрыты от API.
-func (s *Service) Finish(ctx context.Context,
+func (service *Service) Finish(ctx context.Context,
 	id uuid.UUID,
 	owner string,
 	status dbgen.JobStatus,
@@ -375,25 +376,25 @@ func (s *Service) Finish(ctx context.Context,
 	if !Terminal(status) || !code.Valid() {
 		return fmt.Errorf("invalid job outcome")
 	}
-	tx, err := s.DB.Pool.Begin(ctx)
+	tx, err := service.DB.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	if data != nil {
-		raw, e := json.Marshal(data)
-		if e != nil {
-			return e
+		raw, err := json.Marshal(data)
+		if err != nil {
+			return err
 		}
 		if _,
-			e = tx.Exec(ctx,
+			err = tx.Exec(ctx,
 			`
 		UPDATE jobs SET data=$3 WHERE id=$1 AND lease_owner=$2 AND status='running'
 	`,
 			id,
 			owner,
-			raw); e != nil {
-			return e
+			raw); err != nil {
+			return err
 		}
 	}
 	detail := json.RawMessage(`{}`)
@@ -417,11 +418,11 @@ func (s *Service) Finish(ctx context.Context,
 	if tag.RowsAffected() == 0 {
 		return ErrLeaseLost
 	}
-	j, err := dbgen.New(tx).GetJob(ctx, id)
+	job, err := dbgen.New(tx).GetJob(ctx, id)
 	if err != nil {
 		return err
 	}
-	role, actorID := (Actor{UserID: j.CreatedByUserID, AdminID: j.CreatedByAdminID}).Identity()
+	role, actorID := (Actor{UserID: job.CreatedByUserID, AdminID: job.CreatedByAdminID}).Identity()
 	outcome := dbgen.AuditResultSuccess
 	if status == dbgen.JobStatusFailed {
 		outcome = dbgen.AuditResultFailure
@@ -441,5 +442,5 @@ func (s *Service) Finish(ctx context.Context,
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
-	return s.Publish(ctx, id)
+	return service.Publish(ctx, id)
 }

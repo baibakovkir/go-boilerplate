@@ -26,7 +26,7 @@ type NewPassword struct {
 }
 
 // NormalizeEmail убирает внешние пробелы и приводит email к регистру, используемому в БД.
-func NormalizeEmail(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+func NormalizeEmail(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
 
 var credentialsSchema = sync.OnceValue(func() *huma.Schema {
 	registry := huma.NewMapRegistry("#/components/schemas/", huma.DefaultSchemaNamer)
@@ -34,19 +34,19 @@ var credentialsSchema = sync.OnceValue(func() *huma.Schema {
 })
 
 // ValidateCredentials проверяет строку импорта по той же JSON Schema, что используется в HTTP.
-func ValidateCredentials(c Credentials) bool {
-	if !utf8.ValidString(c.Email) || !utf8.ValidString(c.Password) {
+func ValidateCredentials(credentials Credentials) bool {
+	if !utf8.ValidString(credentials.Email) || !utf8.ValidString(credentials.Password) {
 		return false
 	}
-	r := &huma.ValidateResult{}
+	reader := &huma.ValidateResult{}
 	path := huma.NewPathBuffer(nil, 0)
 	huma.Validate(
 		huma.NewMapRegistry("#/components/schemas/", huma.DefaultSchemaNamer),
 		credentialsSchema(),
 		path,
 		huma.ModeWriteToServer,
-		map[string]any{"email": c.Email, "password": c.Password},
-		r,
+		map[string]any{"email": credentials.Email, "password": credentials.Password},
+		reader,
 	)
-	return len(r.Errors) == 0
+	return len(reader.Errors) == 0
 }

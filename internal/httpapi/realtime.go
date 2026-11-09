@@ -33,139 +33,144 @@ type TicketOutput struct {
 	}
 }
 
-func (s *Server) registerRealtime() {
+func (server *Server) registerRealtime() {
 	for _, role := range []auth.Role{auth.Admin, auth.User} {
 		base := "/api/v1"
 		if role == auth.Admin {
 			base += "/admin"
 		}
 		huma.Register(
-			s.API,
-			s.op(
+			server.API,
+			server.op(
 				"POST",
 				base+"/ws-tickets",
 				string(role)+"-ws-ticket",
 				"Issue a single-use job subscription ticket",
 				role,
 			),
-			func(ctx context.Context, i *struct {
+			func(ctx context.Context, job *struct {
 				Body struct {
 					JobID uuid.UUID `json:"job_id" format:"uuid"`
 				}
 			},
 			) (*TicketOutput, error) {
-				p := auth.Current(ctx)
-				if e := s.Auth.Limit(ctx, "ws-ticket:"+p.SessionID, 20, time.Minute); e != nil {
-					return nil, e
+				principal := auth.Current(ctx)
+				if err := server.Auth.Limit(ctx, "ws-ticket:"+principal.SessionID, 20, time.Minute); err != nil {
+					return nil, err
 				}
-				if _, e := s.visibleJob(ctx, i.Body.JobID); e != nil {
-					return nil, e
+				if _, err := server.visibleJob(ctx, job.Body.JobID); err != nil {
+					return nil, err
 				}
 				ticket := security.RandomToken()
-				value, e := json.Marshal(wsTicket{*p, i.Body.JobID})
-				if e != nil {
-					return nil, e
+				value, err := json.Marshal(wsTicket{*principal, job.Body.JobID})
+				if err != nil {
+					return nil, err
 				}
-				if e = s.Auth.Redis.Set(ctx,
-					s.Config.Redis.Prefix+"ws-ticket:"+auth.Digest(ticket),
+				if err = server.Auth.Redis.Set(ctx,
+					server.Config.Redis.Prefix+"ws-ticket:"+auth.Digest(ticket),
 					value,
-					30*time.Second).Err(); e != nil {
-					return nil, s.Auth.Failure(ctx, "create websocket ticket", e)
+					30*time.Second).Err(); err != nil {
+					return nil, server.Auth.Failure(ctx, "create websocket ticket", err)
 				}
-				o := &TicketOutput{}
-				o.Body.Ticket = ticket
-				o.Body.ExpiresIn = 30
-				o.Body.URL = base + "/ws?ticket=" + ticket
-				return o, nil
+				output := &TicketOutput{}
+				output.Body.Ticket = ticket
+				output.Body.ExpiresIn = 30
+				output.Body.URL = base + "/ws?ticket=" + ticket
+				return output, nil
 			},
 		)
-		s.Router.Get(base+"/ws", s.websocket)
+		server.Router.Get(base+"/ws", server.websocket)
 	}
 }
 
-func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
-	raw := r.URL.Query().Get("ticket")
-	if len(raw) != 43 || len(r.URL.Query()) != 1 {
-		s.rawError(w, r, huma.Error401Unauthorized("single-use ticket required"))
+func (server *Server) websocket(response http.ResponseWriter, request *http.Request) {
+	raw := request.URL.Query().Get("ticket")
+	if len(raw) != 43 || len(request.URL.Query()) != 1 {
+		server.rawError(response, request, huma.Error401Unauthorized("single-use ticket required"))
 		return
 	}
-	value, e := s.Auth.Redis.GetDel(r.Context(), s.Config.Redis.Prefix+"ws-ticket:"+auth.Digest(raw)).Bytes()
-	if errors.Is(e, redis.Nil) {
-		s.rawError(w, r, huma.Error401Unauthorized("invalid or expired ticket"))
+	value, err := server.Auth.Redis.GetDel(request.Context(), server.Config.Redis.Prefix+"ws-ticket:"+auth.Digest(raw)).
+		Bytes()
+	if errors.Is(err, redis.Nil) {
+		server.rawError(response, request, huma.Error401Unauthorized("invalid or expired ticket"))
 		return
 	}
-	if e != nil {
-		s.rawError(w, r, s.Auth.Failure(r.Context(), "consume websocket ticket", e))
+	if err != nil {
+		server.rawError(response, request, server.Auth.Failure(request.Context(), "consume websocket ticket", err))
 		return
 	}
 	var ticket wsTicket
-	if e = json.Unmarshal(value, &ticket); e != nil {
-		s.rawError(w, r, huma.Error401Unauthorized("invalid ticket"))
+	if err = json.Unmarshal(value, &ticket); err != nil {
+		server.rawError(response, request, huma.Error401Unauthorized("invalid ticket"))
 		return
 	}
 	role := auth.User
-	if strings.HasPrefix(r.URL.Path, "/api/v1/admin/") {
+	if strings.HasPrefix(request.URL.Path, "/api/v1/admin/") {
 		role = auth.Admin
 	}
 	if ticket.Principal.Role != role {
-		s.rawError(w, r, huma.Error403Forbidden("administrator required"))
+		server.rawError(response, request, huma.Error403Forbidden("administrator required"))
 		return
 	}
-	if e = s.Auth.ValidatePrincipal(r.Context(), &ticket.Principal); e != nil {
-		s.rawError(w, r, e)
+	if err = server.Auth.ValidatePrincipal(request.Context(), &ticket.Principal); err != nil {
+		server.rawError(response, request, err)
 		return
 	}
 	select {
-	case s.wsSlots <- struct{}{}:
-		defer func() { <-s.wsSlots }()
+	case server.wsSlots <- struct{}{}:
+		defer func() { <-server.wsSlots }()
 	default:
-		s.rawError(w, r, huma.Error503ServiceUnavailable("connection limit reached"))
+		server.rawError(response, request, huma.Error503ServiceUnavailable("connection limit reached"))
 		return
 	}
-	conn, e := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: s.Config.HTTPServer.AllowedOrigins})
-	if e != nil {
+	conn, err := websocket.Accept(
+		response,
+		request,
+		&websocket.AcceptOptions{OriginPatterns: server.Config.HTTPServer.AllowedOrigins},
+	)
+	if err != nil {
 		return
 	}
 	defer conn.CloseNow()
 	conn.SetReadLimit(1024)
-	ctx, cancel := context.WithDeadline(r.Context(), ticket.Principal.ExpiresAt)
+	ctx, cancel := context.WithDeadline(request.Context(), ticket.Principal.ExpiresAt)
 	defer cancel()
-	stopShutdown := context.AfterFunc(s.lifetime, cancel)
+	stopShutdown := context.AfterFunc(server.lifetime, cancel)
 	defer stopShutdown()
 	ctx = conn.CloseRead(ctx)
-	sub := s.Auth.Redis.Subscribe(ctx, s.Config.Redis.Prefix+"job:"+ticket.JobID.String())
+	sub := server.Auth.Redis.Subscribe(ctx, server.Config.Redis.Prefix+"job:"+ticket.JobID.String())
 	defer sub.Close()
-	if _, e = sub.Receive(ctx); e != nil {
+	if _, err = sub.Receive(ctx); err != nil {
 		conn.Close(websocket.StatusInternalError, "subscription unavailable")
 		return
 	}
 	var version int64
 	send := func() error {
-		if e := s.Auth.ValidatePrincipal(ctx, &ticket.Principal); e != nil {
-			return e
+		if err := server.Auth.ValidatePrincipal(ctx, &ticket.Principal); err != nil {
+			return err
 		}
-		j, e := s.Auth.DB.Q.GetJob(ctx, ticket.JobID)
-		if e != nil {
-			return e
+		job, err := server.Auth.DB.Queries.GetJob(ctx, ticket.JobID)
+		if err != nil {
+			return err
 		}
-		if !jobs.CanRead(j, &ticket.Principal) {
+		if !jobs.CanRead(job, &ticket.Principal) {
 			return huma.Error404NotFound("job not found")
 		}
-		if j.Version <= version {
+		if job.Version <= version {
 			return nil
 		}
 		writeCtx, stop := context.WithTimeout(ctx, 5*time.Second)
 		defer stop()
-		if e = wsjson.Write(writeCtx, conn, struct {
+		if err = wsjson.Write(writeCtx, conn, struct {
 			Type string        `json:"type"`
 			Job  jobs.Snapshot `json:"job"`
-		}{"job.progress", jobs.Public(j)}); e != nil {
-			return e
+		}{"job.progress", jobs.Public(job)}); err != nil {
+			return err
 		}
-		version = j.Version
+		version = job.Version
 		return nil
 	}
-	if e = send(); e != nil {
+	if err = send(); err != nil {
 		conn.Close(websocket.StatusPolicyViolation, "subscription unavailable")
 		return
 	}
@@ -188,7 +193,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		case <-tick.C:
 			seconds++
 			if dirty || seconds%5 == 0 {
-				if e = send(); e != nil {
+				if err = send(); err != nil {
 					conn.Close(websocket.StatusPolicyViolation, "session or subscription ended")
 					return
 				}

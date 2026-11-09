@@ -3,9 +3,9 @@ package security
 import "testing"
 
 func TestPasswordHash(t *testing.T) {
-	hash, e := HashPassword("пароль6")
-	if e != nil {
-		t.Fatal(e)
+	hash, err := HashPassword("пароль6")
+	if err != nil {
+		t.Fatal(err)
 	}
 	if !CheckPassword(hash, "пароль6") {
 		t.Fatal("matching password rejected")
@@ -30,8 +30,8 @@ func TestPasswordHash(t *testing.T) {
 
 func BenchmarkPasswordHash(b *testing.B) {
 	for b.Loop() {
-		if _, e := HashPassword("secret123"); e != nil {
-			b.Fatal(e)
+		if _, err := HashPassword("secret123"); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

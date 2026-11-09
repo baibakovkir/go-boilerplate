@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
-	"go-boilerplate/internal/config"
+	appconfig "go-boilerplate/internal/config"
 	"go-boilerplate/internal/database/dbgen"
 )
 
@@ -19,47 +19,47 @@ var migrations embed.FS
 
 // Store объединяет пул PostgreSQL и сгенерированные типизированные запросы.
 type Store struct {
-	Pool *pgxpool.Pool
-	Q    *dbgen.Queries
+	Pool    *pgxpool.Pool
+	Queries *dbgen.Queries
 }
 
 // Open создаёт пул PostgreSQL и проверяет соединение; закрытие остаётся за вызывающим кодом.
-func Open(ctx context.Context, c config.PostgresConfig) (*Store, error) {
-	pool, e := pgxpool.New(ctx, c.URL())
-	if e != nil {
-		return nil, fmt.Errorf("configure postgres: %w", e)
+func Open(ctx context.Context, config appconfig.PostgresConfig) (*Store, error) {
+	pool, err := pgxpool.New(ctx, config.URL())
+	if err != nil {
+		return nil, fmt.Errorf("configure postgres: %w", err)
 	}
-	if e = pool.Ping(ctx); e != nil {
+	if err = pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("connect postgres: %w", e)
+		return nil, fmt.Errorf("connect postgres: %w", err)
 	}
 	return &Store{pool, dbgen.New(pool)}, nil
 }
 
 // Close закрывает пул PostgreSQL после завершения использующих его операций.
-func (s *Store) Close() { s.Pool.Close() }
+func (store *Store) Close() { store.Pool.Close() }
 
 // Migrate применяет встроенные SQL-миграции под управлением Goose.
-func Migrate(ctx context.Context, c config.PostgresConfig) error {
-	pool, e := pgxpool.New(ctx, c.URL())
-	if e != nil {
-		return e
+func Migrate(ctx context.Context, config appconfig.PostgresConfig) error {
+	pool, err := pgxpool.New(ctx, config.URL())
+	if err != nil {
+		return err
 	}
 	defer pool.Close()
 	db := stdlib.OpenDBFromPool(pool)
 	defer db.Close()
-	provider, e := goose.NewProvider(goose.DialectPostgres, db, mustSub())
-	if e != nil {
-		return e
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, mustSub())
+	if err != nil {
+		return err
 	}
-	_, e = provider.Up(ctx)
-	return e
+	_, err = provider.Up(ctx)
+	return err
 }
 
 func mustSub() fs.FS {
-	f, e := fs.Sub(migrations, "migrations")
-	if e != nil {
-		panic(e)
+	file, err := fs.Sub(migrations, "migrations")
+	if err != nil {
+		panic(err)
 	}
-	return f
+	return file
 }

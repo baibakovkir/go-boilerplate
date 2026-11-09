@@ -16,25 +16,25 @@ import (
 )
 
 // RemoveInputs удаляет закрытые входные файлы завершённой задачи и их ключи из data.
-func (s *Service) RemoveInputs(ctx context.Context, id uuid.UUID) error {
-	j, err := s.DB.Q.GetJob(ctx, id)
+func (service *Service) RemoveInputs(ctx context.Context, id uuid.UUID) error {
+	job, err := service.DB.Queries.GetJob(ctx, id)
 	if err != nil {
 		return err
 	}
-	if !Terminal(j.Status) {
+	if !Terminal(job.Status) {
 		return nil
 	}
-	data, err := Decode(j)
+	data, err := Decode(job)
 	if err != nil {
 		return err
 	}
 	kept := make([]File, 0, len(data.Files))
-	for _, f := range data.Files {
-		if f.Role != dbgen.JobFileRoleInput {
-			kept = append(kept, f)
+	for _, file := range data.Files {
+		if file.Role != dbgen.JobFileRoleInput {
+			kept = append(kept, file)
 			continue
 		}
-		if err = s.removeFile(f); err != nil {
+		if err = service.removeFile(file); err != nil {
 			return err
 		}
 	}
@@ -42,14 +42,14 @@ func (s *Service) RemoveInputs(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.Pool.Exec(ctx, `
+	_, err = service.DB.Pool.Exec(ctx, `
 		UPDATE jobs SET data=jsonb_set(data, '{files}', $2, true) WHERE id=$1
 	`, id, raw)
 	return err
 }
 
-func (s *Service) removeFile(f File) error {
-	path, err := s.Path(f.Key)
+func (service *Service) removeFile(file File) error {
+	path, err := service.Path(file.Key)
 	if err != nil {
 		return err
 	}
@@ -60,9 +60,9 @@ func (s *Service) removeFile(f File) error {
 }
 
 // CleanupFiles очищает файлы и общую диагностику; содержимое Input принадлежит обработчику.
-func (s *Service) CleanupFiles(ctx context.Context) error {
+func (service *Service) CleanupFiles(ctx context.Context) error {
 	rows,
-		err := s.DB.Pool.Query(ctx,
+		err := service.DB.Pool.Query(ctx,
 		`
 		SELECT id FROM jobs WHERE status IN ('completed', 'completed_with_errors', 'failed')
 		AND NOT artifacts_expired
@@ -84,50 +84,50 @@ func (s *Service) CleanupFiles(ctx context.Context) error {
 	}
 	rows.Close()
 	for _, id := range ids {
-		if err = s.RemoveInputs(ctx, id); err != nil {
+		if err = service.RemoveInputs(ctx, id); err != nil {
 			return err
 		}
-		j, e := s.DB.Q.GetJob(ctx, id)
-		if e != nil {
-			return e
+		job, err := service.DB.Queries.GetJob(ctx, id)
+		if err != nil {
+			return err
 		}
-		if time.Since(j.UpdatedAt) < s.Config.Jobs.ArtifactTTL {
+		if time.Since(job.UpdatedAt) < service.Config.Jobs.ArtifactTTL {
 			continue
 		}
-		data, e := Decode(j)
-		if e != nil {
-			return e
+		data, err := Decode(job)
+		if err != nil {
+			return err
 		}
-		for _, f := range data.Files {
-			if e = s.removeFile(f); e != nil {
-				return e
+		for _, file := range data.Files {
+			if err = service.removeFile(file); err != nil {
+				return err
 			}
 		}
-		tx, e := s.DB.Pool.Begin(ctx)
-		if e != nil {
-			return e
+		tx, err := service.DB.Pool.Begin(ctx)
+		if err != nil {
+			return err
 		}
-		if _, e = tx.Exec(ctx, `
+		if _, err = tx.Exec(ctx, `
 		DELETE FROM job_issues WHERE job_id=$1
-	`, id); e != nil {
+	`, id); err != nil {
 			tx.Rollback(ctx)
-			return e
+			return err
 		}
 		if _,
-			e = tx.Exec(ctx,
+			err = tx.Exec(ctx,
 			`
 		UPDATE jobs SET artifacts_expired=true, data=data-'files'-'checkpoint' WHERE id=$1
 	`,
-			id); e != nil {
+			id); err != nil {
 
 			tx.Rollback(ctx)
-			return e
+			return err
 		}
-		if e = tx.Commit(ctx); e != nil {
-			return e
+		if err = tx.Commit(ctx); err != nil {
+			return err
 		}
 	}
-	entries, err := os.ReadDir(s.Config.Jobs.Directory)
+	entries, err := os.ReadDir(service.Config.Jobs.Directory)
 	if err != nil {
 		return err
 	}
@@ -135,9 +135,9 @@ func (s *Service) CleanupFiles(ctx context.Context) error {
 		if entry.IsDir() && !strings.Contains(entry.Name(), ".work.") {
 			continue
 		}
-		info, e := entry.Info()
-		if e != nil {
-			return e
+		info, err := entry.Info()
+		if err != nil {
+			return err
 		}
 		if time.Since(info.ModTime()) < 24*time.Hour {
 			continue
@@ -146,37 +146,37 @@ func (s *Service) CleanupFiles(ctx context.Context) error {
 		if len(name) < 36 {
 			continue
 		}
-		id, e := uuid.Parse(name[:36])
-		if e != nil {
+		id, err := uuid.Parse(name[:36])
+		if err != nil {
 			continue
 		}
-		j, e := s.DB.Q.GetJob(ctx, id)
+		job, err := service.DB.Queries.GetJob(ctx, id)
 		keep := false
-		if e == nil {
-			keep = !Terminal(j.Status)
-			if !keep && !j.ArtifactsExpired {
-				data, decodeErr := Decode(j)
+		if err == nil {
+			keep = !Terminal(job.Status)
+			if !keep && !job.ArtifactsExpired {
+				data, decodeErr := Decode(job)
 				if decodeErr != nil {
 					return decodeErr
 				}
-				for _, f := range data.Files {
-					if f.Key == name {
+				for _, file := range data.Files {
+					if file.Key == name {
 						keep = true
 					}
 				}
 			}
-		} else if !errors.Is(e, pgx.ErrNoRows) {
-			return e
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return err
 		}
 		if !keep {
-			path := filepath.Join(s.Config.Jobs.Directory, name)
+			path := filepath.Join(service.Config.Jobs.Directory, name)
 			if entry.IsDir() {
-				e = os.RemoveAll(path)
+				err = os.RemoveAll(path)
 			} else {
-				e = os.Remove(path)
+				err = os.Remove(path)
 			}
-			if e != nil && !errors.Is(e, os.ErrNotExist) {
-				return e
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
 			}
 		}
 	}

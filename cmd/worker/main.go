@@ -9,7 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"go-boilerplate/internal/config"
+	appconfig "go-boilerplate/internal/config"
 	"go-boilerplate/internal/database"
 	"go-boilerplate/internal/jobs"
 	"go-boilerplate/internal/lib/logger"
@@ -18,38 +18,40 @@ import (
 )
 
 func main() {
-	if e := run(); e != nil {
-		logger.SetupLogger("prod").Error("worker failed", "error", e)
+	if err := run(); err != nil {
+		logger.SetupLogger("prod").Error("worker failed", "error", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	c, e := config.Load()
-	if e != nil {
-		return e
+	config, err := appconfig.Load()
+	if err != nil {
+		return err
 	}
-	log := logger.SetupLogger(c.Env)
+	log := logger.SetupLogger(config.Env)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	db, e := database.Open(ctx, c.Postgres)
-	if e != nil {
-		return e
+	db, err := database.Open(ctx, config.Postgres)
+	if err != nil {
+		return err
 	}
 	defer db.Close()
-	r := redis.NewClient(&redis.Options{Addr: c.Redis.Address, Password: c.Redis.Password, DB: c.Redis.DB})
-	defer r.Close()
-	j, e := jobs.New(db, r, c)
-	if e != nil {
-		return e
+	redisClient := redis.NewClient(
+		&redis.Options{Addr: config.Redis.Address, Password: config.Redis.Password, DB: config.Redis.DB},
+	)
+	defer redisClient.Close()
+	service, err := jobs.New(db, redisClient, config)
+	if err != nil {
+		return err
 	}
-	if e = usertasks.Register(j); e != nil {
-		return e
+	if err = usertasks.Register(service); err != nil {
+		return err
 	}
-	w, e := worker.New(j, log)
-	if e != nil {
-		return e
+	worker, err := worker.New(service, log)
+	if err != nil {
+		return err
 	}
-	log.Info("worker starting", "topic", c.Kafka.Topic)
-	return w.Run(ctx)
+	log.Info("worker starting", "topic", config.Kafka.Topic)
+	return worker.Run(ctx)
 }

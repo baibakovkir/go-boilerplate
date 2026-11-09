@@ -56,7 +56,8 @@ func PasswordResetMessage(token string, ttl time.Duration) (Message, error) {
 		Secret:       token,
 		Validity:     ttl.String(),
 		Instructions: "Submit this token with your new password to the password reset API.",
-		Safety:       "If you did not request a password reset, you can ignore this email. Your password has not been changed.",
+		Safety: "If you did not request a password reset, you can ignore this email. " +
+			"Your password has not been changed.",
 	}, fmt.Sprintf(
 		"Your one-time password reset token:\n%s\nValid for %s. "+
 			"Submit it with your new password to the password reset API. "+

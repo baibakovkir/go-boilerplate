@@ -15,7 +15,8 @@ func TestSecurityMessages(t *testing.T) {
 		if !strings.Contains(message.Text, `<secret&value>`) || !strings.Contains(message.Text, "5m0s") {
 			t.Fatal("plain text must preserve the secret and its validity")
 		}
-		if strings.Contains(message.HTML, `<secret&value>`) || !strings.Contains(message.HTML, "&lt;secret&amp;value&gt;") {
+		if strings.Contains(message.HTML, `<secret&value>`) ||
+			!strings.Contains(message.HTML, "&lt;secret&amp;value&gt;") {
 			t.Fatal("HTML must escape the secret")
 		}
 		if !strings.Contains(message.HTML, "5m0s") {

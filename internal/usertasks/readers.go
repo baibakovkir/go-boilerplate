@@ -11,7 +11,7 @@ import (
 
 	"github.com/xuri/excelize/v2"
 
-	"go-boilerplate/internal/config"
+	appconfig "go-boilerplate/internal/config"
 )
 
 type rowReader interface {
@@ -19,94 +19,95 @@ type rowReader interface {
 	Close() error
 }
 type csvRows struct {
-	f       *os.File
+	file    *os.File
 	scanner *bufio.Scanner
 }
 
-func (c *csvRows) Next() ([]string, error) {
-	for c.scanner.Scan() {
-		line := c.scanner.Text()
+func (rows *csvRows) Next() ([]string, error) {
+	for rows.scanner.Scan() {
+		line := rows.scanner.Text()
 		if line == "" {
 			continue
 		}
 		// Одна CSV-запись занимает физическую строку: это ограничивает память парсера.
-		r := csv.NewReader(strings.NewReader(line))
-		r.FieldsPerRecord = -1
-		return r.Read()
+		reader := csv.NewReader(strings.NewReader(line))
+		reader.FieldsPerRecord = -1
+		return reader.Read()
 	}
-	if e := c.scanner.Err(); e != nil {
-		return nil, e
+	if err := rows.scanner.Err(); err != nil {
+		return nil, err
 	}
 	return nil, io.EOF
 }
-func (c *csvRows) Close() error { return c.f.Close() }
+func (rows *csvRows) Close() error { return rows.file.Close() }
 
 type xlsxRows struct {
-	f *excelize.File
-	r *excelize.Rows
+	workbook *excelize.File
+	reader   *excelize.Rows
 }
 
-func (x *xlsxRows) Next() ([]string, error) {
-	if !x.r.Next() {
-		if e := x.r.Error(); e != nil {
-			return nil, e
+func (rows *xlsxRows) Next() ([]string, error) {
+	if !rows.reader.Next() {
+		if err := rows.reader.Error(); err != nil {
+			return nil, err
 		}
 		return nil, io.EOF
 	}
-	return x.r.Columns()
+	return rows.reader.Columns()
 }
-func (x *xlsxRows) Close() error { return errors.Join(x.r.Close(), x.f.Close()) }
 
-func openRows(path, format string, c config.JobsConfig) (rowReader, error) {
+func (rows *xlsxRows) Close() error { return errors.Join(rows.reader.Close(), rows.workbook.Close()) }
+
+func openRows(path, format string, config appconfig.JobsConfig) (rowReader, error) {
 	if format == "csv" {
-		f, e := os.Open(path)
-		if e != nil {
-			return nil, e
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, err
 		}
-		scan := bufio.NewScanner(f)
+		scan := bufio.NewScanner(file)
 		scan.Buffer(make([]byte, 4096), 64*1024)
-		return &csvRows{f, scan}, nil
+		return &csvRows{file, scan}, nil
 	}
-	f, e := excelize.OpenFile(
+	workbook, err := excelize.OpenFile(
 		path,
 		excelize.Options{
-			UnzipSizeLimit:    c.MaxUnzipBytes,
+			UnzipSizeLimit:    config.MaxUnzipBytes,
 			UnzipXMLSizeLimit: 16 << 20,
-			TmpDir:            c.Directory,
+			TmpDir:            config.Directory,
 			RawCellValue:      true,
 		},
 	)
-	if e != nil {
-		return nil, e
+	if err != nil {
+		return nil, err
 	}
-	sheets := f.GetSheetList()
+	sheets := workbook.GetSheetList()
 	if len(sheets) != 1 {
-		f.Close()
+		workbook.Close()
 		return nil, fmt.Errorf("XLSX must contain exactly one sheet")
 	}
-	rows, e := f.Rows(sheets[0])
-	if e != nil {
-		f.Close()
-		return nil, e
+	rows, err := workbook.Rows(sheets[0])
+	if err != nil {
+		workbook.Close()
+		return nil, err
 	}
-	return &xlsxRows{f, rows}, nil
+	return &xlsxRows{workbook, rows}, nil
 }
 
-func readHeader(r rowReader) error {
-	h, e := r.Next()
-	if e != nil {
-		return fmt.Errorf("missing header: %w", e)
+func readHeader(reader rowReader) error {
+	handler, err := reader.Next()
+	if err != nil {
+		return fmt.Errorf("missing header: %w", err)
 	}
-	if len(h) != 2 || strings.TrimPrefix(h[0], "\ufeff") != "email" || h[1] != "password" {
+	if len(handler) != 2 || strings.TrimPrefix(handler[0], "\ufeff") != "email" || handler[1] != "password" {
 		return fmt.Errorf("expected email,password header")
 	}
 	return nil
 }
 
 // SafeText экранирует начало CSV-значения, которое табличный редактор может принять за формулу.
-func SafeText(v string) string {
-	if v != "" && strings.ContainsAny(string(v[0]), "=+-@\t\r\n") {
-		return "'" + v
+func SafeText(value string) string {
+	if value != "" && strings.ContainsAny(string(value[0]), "=+-@\t\r\n") {
+		return "'" + value
 	}
-	return v
+	return value
 }

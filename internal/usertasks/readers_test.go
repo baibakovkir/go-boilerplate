@@ -11,71 +11,72 @@ import (
 
 	"github.com/xuri/excelize/v2"
 
-	"go-boilerplate/internal/config"
+	appconfig "go-boilerplate/internal/config"
 	"go-boilerplate/internal/jobs"
 )
 
 func TestReadersAndLimits(t *testing.T) {
 	dir := t.TempDir()
-	c := config.JobsConfig{Directory: dir, MaxUnzipBytes: 32 << 20}
-	p := filepath.Join(dir, "users.csv")
-	if e := os.WriteFile(p, []byte("\ufeffemail,password\nu@example.test,123456\n"), 0o600); e != nil {
-		t.Fatal(e)
+	config := appconfig.JobsConfig{Directory: dir, MaxUnzipBytes: 32 << 20}
+	parts := filepath.Join(dir, "users.csv")
+	if err := os.WriteFile(parts, []byte("\ufeffemail,password\nu@example.test,123456\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	r, e := openRows(p, "csv", c)
-	if e != nil {
-		t.Fatal(e)
+	reader, err := openRows(parts, "csv", config)
+	if err != nil {
+		t.Fatal(err)
 	}
-	defer r.Close()
-	if e = readHeader(r); e != nil {
-		t.Fatal(e)
+	defer reader.Close()
+	if err = readHeader(reader); err != nil {
+		t.Fatal(err)
 	}
-	values, e := r.Next()
-	if e != nil || len(values) != 2 || values[0] != "u@example.test" {
-		t.Fatal(values, e)
+	values, err := reader.Next()
+	if err != nil || len(values) != 2 || values[0] != "u@example.test" {
+		t.Fatal(values, err)
 	}
-	if e = os.WriteFile(p, []byte("email,password\n"+strings.Repeat("x", 70<<10)+",secret1\n"), 0o600); e != nil {
-		t.Fatal(e)
+	err = os.WriteFile(parts, []byte("email,password\n"+strings.Repeat("x", 70<<10)+",secret1\n"), 0o600)
+	if err != nil {
+		t.Fatal(err)
 	}
-	limited, _ := openRows(p, "csv", c)
+	limited, _ := openRows(parts, "csv", config)
 	defer limited.Close()
 	_ = readHeader(limited)
-	if _, e = limited.Next(); e == nil {
+	if _, err = limited.Next(); err == nil {
 		t.Fatal("unbounded CSV line accepted")
 	}
-	x := excelize.NewFile()
-	_ = x.SetSheetRow("Sheet1", "A1", &[]string{"email", "password"})
-	_ = x.SetSheetRow("Sheet1", "A2", &[]string{"x@example.test", "123456"})
+	workbook := excelize.NewFile()
+	_ = workbook.SetSheetRow("Sheet1", "A1", &[]string{"email", "password"})
+	_ = workbook.SetSheetRow("Sheet1", "A2", &[]string{"x@example.test", "123456"})
 	path := filepath.Join(dir, "users.xlsx")
-	if e = x.SaveAs(path); e != nil {
-		t.Fatal(e)
+	if err = workbook.SaveAs(path); err != nil {
+		t.Fatal(err)
 	}
-	x.Close()
-	xr, e := openRows(path, "xlsx", c)
-	if e != nil {
-		t.Fatal(e)
+	workbook.Close()
+	xr, err := openRows(path, "xlsx", config)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if e = readHeader(xr); e != nil {
-		t.Fatal(e)
+	if err = readHeader(xr); err != nil {
+		t.Fatal(err)
 	}
-	v, e := xr.Next()
-	if e != nil || v[0] != "x@example.test" {
-		t.Fatal(v, e)
+	value, err := xr.Next()
+	if err != nil || value[0] != "x@example.test" {
+		t.Fatal(value, err)
 	}
 	xr.Close()
-	x = excelize.NewFile()
-	_, _ = x.NewSheet("Second")
-	_ = x.SaveAs(path)
-	x.Close()
-	if r, e = openRows(path, "xlsx", c); e == nil {
-		r.Close()
+	workbook = excelize.NewFile()
+	_, _ = workbook.NewSheet("Second")
+	_ = workbook.SaveAs(path)
+	workbook.Close()
+	if reader, err = openRows(path, "xlsx", config); err == nil {
+		reader.Close()
 		t.Fatal("multiple sheets accepted")
 	}
 }
 
 func TestSafeExport(t *testing.T) {
-	for _, v := range []string{"=SUM(A1)", "+cmd", "-cmd", "@cmd", "\tcmd"} {
-		if SafeText(v) == v {
+	for _, value := range []string{"=SUM(A1)", "+cmd", "-cmd", "@cmd", "\tcmd"} {
+		if SafeText(value) == value {
 			t.Fatal("formula not escaped")
 		}
 	}
@@ -91,38 +92,38 @@ func TestMillionRows(t *testing.T) {
 	for _, format := range []string{"csv", "xlsx"} {
 		t.Run(format, func(t *testing.T) {
 			dir := t.TempDir()
-			c := config.JobsConfig{Directory: dir, MaxUnzipBytes: 2 << 30}
+			config := appconfig.JobsConfig{Directory: dir, MaxUnzipBytes: 2 << 30}
 			path := filepath.Join(dir, "million."+format)
-			service := &Handlers{Service: &jobs.Service{Config: &config.Config{Jobs: c}}}
-			writer, e := service.writer(path, format)
-			if e != nil {
-				t.Fatal(e)
+			service := &Handlers{Service: &jobs.Service{Config: &appconfig.Config{Jobs: config}}}
+			writer, err := service.writer(path, format)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if e = writer.Write([]string{"email", "password"}); e != nil {
-				t.Fatal(e)
+			if err = writer.Write([]string{"email", "password"}); err != nil {
+				t.Fatal(err)
 			}
-			for n := 0; n < 1000000; n++ {
-				if e = writer.Write([]string{fmt.Sprintf("user%d@example.test", n), "secret123"}); e != nil {
-					t.Fatal(e)
+			for number := 0; number < 1000000; number++ {
+				if err = writer.Write([]string{fmt.Sprintf("user%d@example.test", number), "secret123"}); err != nil {
+					t.Fatal(err)
 				}
 			}
-			if e = writer.Finish(); e != nil {
-				t.Fatal(e)
+			if err = writer.Finish(); err != nil {
+				t.Fatal(err)
 			}
-			if e = writer.Close(); e != nil {
-				t.Fatal(e)
+			if err = writer.Close(); err != nil {
+				t.Fatal(err)
 			}
 			runtime.GC()
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
 			peak := before.HeapAlloc
-			reader, e := openRows(path, format, c)
-			if e != nil {
-				t.Fatal(e)
+			reader, err := openRows(path, format, config)
+			if err != nil {
+				t.Fatal(err)
 			}
 			defer reader.Close()
-			if e = readHeader(reader); e != nil {
-				t.Fatal(e)
+			if err = readHeader(reader); err != nil {
+				t.Fatal(err)
 			}
 			count := 0
 			for {

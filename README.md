@@ -484,3 +484,5 @@ docker compose down
 
 `down` сохраняет данные. `docker compose down -v` удаляет volumes проекта
 **со всеми данными**, включая БД и письма Mailpit.
+
+Правила разработки и нейминга: [AGENTS.md](AGENTS.md).

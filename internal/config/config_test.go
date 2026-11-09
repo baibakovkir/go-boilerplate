@@ -9,7 +9,7 @@ import (
 
 func TestLoadAndOverrides(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if e := os.WriteFile(path, []byte(`env: local
+	if err := os.WriteFile(path, []byte(`env: local
 postgres:
   user: postgres
   password: local
@@ -20,41 +20,42 @@ auth:
 admins:
   - email: admin@example.test
     password: secret1
-`), 0o600); e != nil {
-		t.Fatal(e)
+`), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("CONFIG_PATH", path)
 	t.Setenv("POSTGRES_PORT", "25433")
-	c, e := Load()
-	if e != nil {
-		t.Fatal(e)
+	config, err := Load()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if c.Postgres.Port != 25433 || c.Jobs.MaxRows != 1000000 || c.Jobs.BatchSize != 500 || c.Auth.OTPAttempts != 5 {
+	if config.Postgres.Port != 25433 || config.Jobs.MaxRows != 1000000 || config.Jobs.BatchSize != 500 ||
+		config.Auth.OTPAttempts != 5 {
 		t.Fatal("defaults/overrides not applied")
 	}
-	c.Env = "prod"
-	if e = c.Validate(); e == nil {
+	config.Env = "prod"
+	if err = config.Validate(); err == nil {
 		t.Fatal("insecure production config accepted")
 	}
-	c.Env = "local"
-	c.HTTPServer.AllowedOrigins = []string{"*"}
-	if e = c.Validate(); e == nil {
+	config.Env = "local"
+	config.HTTPServer.AllowedOrigins = []string{"*"}
+	if err = config.Validate(); err == nil {
 		t.Fatal("wildcard CORS accepted")
 	}
-	c.HTTPServer.AllowedOrigins = nil
-	c.HTTPServer.TrustedProxies = []string{"bad"}
-	if e = c.Validate(); e == nil {
+	config.HTTPServer.AllowedOrigins = nil
+	config.HTTPServer.TrustedProxies = []string{"bad"}
+	if err = config.Validate(); err == nil {
 		t.Fatal("invalid proxy accepted")
 	}
-	c.HTTPServer.TrustedProxies = nil
-	c.Audit.Schedule = "broken"
-	if e = c.Validate(); e == nil {
+	config.HTTPServer.TrustedProxies = nil
+	config.Audit.Schedule = "broken"
+	if err = config.Validate(); err == nil {
 		t.Fatal("invalid cron accepted")
 	}
 }
 
 func TestDatabaseCredentialsEscaped(t *testing.T) {
-	c := PostgresConfig{
+	config := PostgresConfig{
 		Host:     "::1",
 		Port:     5432,
 		User:     "user@host",
@@ -62,12 +63,12 @@ func TestDatabaseCredentialsEscaped(t *testing.T) {
 		Database: "test",
 		SSLMode:  "require",
 	}
-	u, e := url.Parse(c.URL())
-	if e != nil {
-		t.Fatal(e)
+	parsedURL, err := url.Parse(config.URL())
+	if err != nil {
+		t.Fatal(err)
 	}
-	p, _ := u.User.Password()
-	if u.User.Username() != c.User || p != c.Password || u.Host != "[::1]:5432" {
+	parts, _ := parsedURL.User.Password()
+	if parsedURL.User.Username() != config.User || parts != config.Password || parsedURL.Host != "[::1]:5432" {
 		t.Fatal("credentials were not escaped correctly")
 	}
 }

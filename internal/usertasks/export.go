@@ -26,112 +26,112 @@ type tableWriter interface {
 	Close() error
 }
 type csvWriter struct {
-	f *os.File
-	w *csv.Writer
+	file   *os.File
+	stream *csv.Writer
 }
 
-func (c *csvWriter) Write(v []string) error { return c.w.Write(v) }
+func (writer *csvWriter) Write(value []string) error { return writer.stream.Write(value) }
 
 // Finish сбрасывает буфер и синхронизирует готовый CSV с диском.
-func (c *csvWriter) Finish() error {
-	c.w.Flush()
-	if e := c.w.Error(); e != nil {
-		return e
+func (writer *csvWriter) Finish() error {
+	writer.stream.Flush()
+	if err := writer.stream.Error(); err != nil {
+		return err
 	}
-	return c.f.Sync()
+	return writer.file.Sync()
 }
-func (c *csvWriter) Close() error { return c.f.Close() }
+func (writer *csvWriter) Close() error { return writer.file.Close() }
 
 type xlsxWriter struct {
-	f    *excelize.File
-	w    *excelize.StreamWriter
-	file *os.File
-	n    int
+	workbook  *excelize.File
+	stream    *excelize.StreamWriter
+	file      *os.File
+	rowNumber int
 }
 
-func (x *xlsxWriter) Write(v []string) error {
-	x.n++
-	cells := make([]any, len(v))
-	for i := range v {
-		cells[i] = v[i]
+func (writer *xlsxWriter) Write(value []string) error {
+	writer.rowNumber++
+	cells := make([]any, len(value))
+	for index := range value {
+		cells[index] = value[index]
 	}
-	return x.w.SetRow(fmt.Sprintf("A%d", x.n), cells)
+	return writer.stream.SetRow(fmt.Sprintf("A%d", writer.rowNumber), cells)
 }
 
 // Finish записывает итоговый ZIP напрямую на диск и синхронизирует XLSX.
-func (x *xlsxWriter) Finish() error {
-	if e := x.w.Flush(); e != nil {
-		return e
+func (writer *xlsxWriter) Finish() error {
+	if err := writer.stream.Flush(); err != nil {
+		return err
 	}
 	// Стандартный Write Excelize собирает итоговый ZIP в памяти. Направляем ZIP-запись
 	// сразу на диск; XML листа уже записан потоково во временное хранилище.
-	x.f.SetZipWriter(func(_ io.Writer) excelize.ZipWriter { return zip.NewWriter(x.file) })
-	if e := x.f.Write(io.Discard); e != nil {
-		return e
+	writer.workbook.SetZipWriter(func(_ io.Writer) excelize.ZipWriter { return zip.NewWriter(writer.file) })
+	if err := writer.workbook.Write(io.Discard); err != nil {
+		return err
 	}
-	return x.file.Sync()
+	return writer.file.Sync()
 }
 
-func (x *xlsxWriter) Close() error {
-	e := x.f.Close()
-	if e2 := x.file.Close(); e == nil {
-		e = e2
+func (writer *xlsxWriter) Close() error {
+	err := writer.workbook.Close()
+	if e2 := writer.file.Close(); err == nil {
+		err = e2
 	}
-	return e
+	return err
 }
 
-func (s *Handlers) writer(path, format string) (tableWriter, error) {
-	f, e := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if e != nil {
-		return nil, e
+func (handlers *Handlers) writer(path, format string) (tableWriter, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
 	}
 	if format == "csv" {
-		return &csvWriter{f, csv.NewWriter(f)}, nil
+		return &csvWriter{file, csv.NewWriter(file)}, nil
 	}
-	x := excelize.NewFile(excelize.Options{TmpDir: filepath.Dir(path)})
-	w, e := x.NewStreamWriter("Sheet1")
-	if e != nil {
-		f.Close()
-		x.Close()
-		return nil, e
+	workbook := excelize.NewFile(excelize.Options{TmpDir: filepath.Dir(path)})
+	writer, err := workbook.NewStreamWriter("Sheet1")
+	if err != nil {
+		file.Close()
+		workbook.Close()
+		return nil, err
 	}
-	return &xlsxWriter{x, w, f, 0}, nil
+	return &xlsxWriter{workbook, writer, file, 0}, nil
 }
 
 // Export строит файл из согласованного снимка БД и публикует его после успешной записи.
-func (s *Handlers) Export(ctx context.Context, j dbgen.Job, owner string) error {
-	data, e := jobs.Decode(j)
-	if e != nil {
-		return e
+func (handlers *Handlers) Export(ctx context.Context, job dbgen.Job, owner string) error {
+	data, err := jobs.Decode(job)
+	if err != nil {
+		return err
 	}
 	var input ExportOptions
-	if e = json.Unmarshal(data.Input, &input); e != nil || !input.Format.Valid() {
+	if err = json.Unmarshal(data.Input, &input); err != nil || !input.Format.Valid() {
 		return jobs.Permanent(dbgen.JobErrorCodeInvalidPayload)
 	}
-	name := j.ID.String() + ".result." + string(input.Format)
-	final, _ := s.Path(name)
-	workdir := filepath.Join(s.Config.Jobs.Directory, j.ID.String()+".work."+owner)
-	if e := os.MkdirAll(workdir, 0o700); e != nil {
-		return e
+	name := job.ID.String() + ".result." + string(input.Format)
+	final, _ := handlers.Path(name)
+	workdir := filepath.Join(handlers.Config.Jobs.Directory, job.ID.String()+".work."+owner)
+	if err := os.MkdirAll(workdir, 0o700); err != nil {
+		return err
 	}
 	defer os.RemoveAll(workdir)
 	temp := filepath.Join(workdir, "result.tmp")
 	defer os.Remove(temp)
-	writer, e := s.writer(temp, string(input.Format))
-	if e != nil {
-		return e
+	writer, err := handlers.writer(temp, string(input.Format))
+	if err != nil {
+		return err
 	}
 	defer writer.Close()
-	if e = writer.Write([]string{"id", "email", "blocked", "created_at", "updated_at"}); e != nil {
-		return e
+	if err = writer.Write([]string{"id", "email", "blocked", "created_at", "updated_at"}); err != nil {
+		return err
 	}
-	tx, e := s.DB.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if e != nil {
-		return e
+	tx, err := handlers.DB.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return err
 	}
 	defer tx.Rollback(ctx)
 	var total int64
-	e = tx.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`
 		SELECT count(*) FROM users WHERE ($1='' OR strpos(email, $1)>0) AND ($2='' OR
 		blocked::text=$2)
@@ -139,24 +139,24 @@ func (s *Handlers) Export(ctx context.Context, j dbgen.Job, owner string) error 
 		input.Email,
 		input.Blocked).
 		Scan(&total)
-	if e != nil {
-		return e
+	if err != nil {
+		return err
 	}
-	if total > s.Config.Jobs.MaxRows {
+	if total > handlers.Config.Jobs.MaxRows {
 		return jobs.Permanent(dbgen.JobErrorCodeRowLimitExceeded)
 	}
 	if _,
-		e = s.DB.Pool.Exec(ctx,
+		err = handlers.DB.Pool.Exec(ctx,
 		`
 		UPDATE jobs SET total=$3, processed=0, succeeded=0, failed=0, version=version+1,
 		updated_at=now() WHERE id=$1 AND lease_owner=$2
 	`,
-		j.ID,
+		job.ID,
 		owner,
-		total); e != nil {
-		return e
+		total); err != nil {
+		return err
 	}
-	rows, e := tx.Query(
+	rows, err := tx.Query(
 		ctx,
 		`
 		SELECT id, email, blocked, created_at, updated_at FROM users WHERE ($1='' OR
@@ -166,8 +166,8 @@ func (s *Handlers) Export(ctx context.Context, j dbgen.Job, owner string) error 
 		input.Email,
 		input.Blocked,
 	)
-	if e != nil {
-		return e
+	if err != nil {
+		return err
 	}
 	var processed int64
 	last := time.Time{}
@@ -176,86 +176,86 @@ func (s *Handlers) Export(ctx context.Context, j dbgen.Job, owner string) error 
 		var email string
 		var blocked bool
 		var created, updated time.Time
-		if e = rows.Scan(&id, &email, &blocked, &created, &updated); e != nil {
+		if err = rows.Scan(&id, &email, &blocked, &created, &updated); err != nil {
 			rows.Close()
-			return e
+			return err
 		}
-		if e = writer.Write([]string{
+		if err = writer.Write([]string{
 			id.String(),
 			SafeText(email),
 			strconv.FormatBool(blocked),
 			created.UTC().Format(time.RFC3339),
 			updated.UTC().Format(time.RFC3339),
-		}); e != nil {
+		}); err != nil {
 
 			rows.Close()
-			return e
+			return err
 		}
 		processed++
 		if time.Since(last) >= time.Second {
-			tag, e := s.DB.Pool.Exec(
+			tag, err := handlers.DB.Pool.Exec(
 				ctx,
 				`
 		UPDATE jobs SET processed=$3, succeeded=$3, version=version+1, updated_at=now() WHERE
 		id=$1 AND lease_owner=$2 AND status='running'
 	`,
 
-				j.ID,
+				job.ID,
 				owner,
 				processed,
 			)
-			if e != nil {
+			if err != nil {
 				rows.Close()
-				return e
+				return err
 			}
 			if tag.RowsAffected() == 0 {
 				rows.Close()
 				return jobs.ErrLeaseLost
 			}
-			_ = s.Publish(ctx, j.ID)
+			_ = handlers.Publish(ctx, job.ID)
 			last = time.Now()
 		}
 	}
-	if e = rows.Err(); e != nil {
-		return e
+	if err = rows.Err(); err != nil {
+		return err
 	}
 	rows.Close()
-	if e = tx.Commit(ctx); e != nil {
-		return e
+	if err = tx.Commit(ctx); err != nil {
+		return err
 	}
-	if e = writer.Finish(); e != nil {
-		return e
+	if err = writer.Finish(); err != nil {
+		return err
 	}
-	if e = writer.Close(); e != nil {
-		return e
+	if err = writer.Close(); err != nil {
+		return err
 	}
 	// Перед публикацией файла проверяем аренду, чтобы устаревший worker не подменил результат.
-	guard, e := s.DB.Pool.Begin(ctx)
-	if e != nil {
-		return e
+	guard, err := handlers.DB.Pool.Begin(ctx)
+	if err != nil {
+		return err
 	}
 	defer guard.Rollback(ctx)
 	var holder string
-	if e = guard.QueryRow(ctx,
+	if err = guard.QueryRow(ctx,
 		`
 		SELECT lease_owner FROM jobs WHERE id=$1 AND status='running' FOR UPDATE
 	`,
-		j.ID).Scan(&holder); e != nil {
-		return e
+		job.ID).Scan(&holder); err != nil {
+		return err
 	}
 	if holder != owner {
 		return jobs.ErrLeaseLost
 	}
-	if e = os.Rename(temp, final); e != nil {
-		return e
+	if err = os.Rename(temp, final); err != nil {
+		return err
 	}
-	if _, e = guard.Exec(ctx, `
+	if _, err = guard.Exec(ctx, `
 		UPDATE jobs SET processed=$2, succeeded=$2 WHERE id=$1
-	`, j.ID, processed); e != nil {
-		return e
+	`, job.ID, processed); err != nil {
+		return err
 	}
-	if e = guard.Commit(ctx); e != nil {
-		return e
+	if err = guard.Commit(ctx); err != nil {
+		return err
 	}
 	data.Files = append(data.Files,
 		jobs.File{
@@ -265,5 +265,5 @@ func (s *Handlers) Export(ctx context.Context, j dbgen.Job, owner string) error 
 			Name:   "users." + string(input.Format),
 		})
 	data.Result, _ = json.Marshal(map[string]any{"format": input.Format, "count": processed})
-	return s.Finish(ctx, j.ID, owner, dbgen.JobStatusCompleted, &data, dbgen.JobErrorCodeNone)
+	return handlers.Finish(ctx, job.ID, owner, dbgen.JobStatusCompleted, &data, dbgen.JobErrorCodeNone)
 }

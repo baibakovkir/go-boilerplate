@@ -84,8 +84,8 @@ type Error struct {
     Cause error
 }
 
-func (e *Error) Error() string { return string(e.Code) }
-func (e *Error) Unwrap() error { return e.Cause }
+func (appError *Error) Error() string { return string(appError.Code) }
+func (appError *Error) Unwrap() error { return appError.Cause }
 ```
 
 Сервис возвращает `&apperror.Error{Code: apperror.Unavailable, Op: "load account",
@@ -119,11 +119,11 @@ type Actor struct {
     RequestID string
 }
 
-func (s *Service) SetBlocked(
+func (service *Service) SetBlocked(
     ctx context.Context, actor Actor, userID uuid.UUID, blocked bool,
 ) error
 
-func (s *Service) RevokeSessions(
+func (service *Service) RevokeSessions(
     ctx context.Context, actor Actor, userID uuid.UUID,
 ) error
 ```

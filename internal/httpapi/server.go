@@ -26,7 +26,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"go-boilerplate/internal/auth"
-	"go-boilerplate/internal/config"
+	appconfig "go-boilerplate/internal/config"
 	"go-boilerplate/internal/jobs"
 	"go-boilerplate/internal/security"
 )
@@ -35,7 +35,7 @@ import (
 type Server struct {
 	Auth         *auth.Service
 	Jobs         *jobs.Service
-	Config       *config.Config
+	Config       *appconfig.Config
 	Log          *slog.Logger
 	Router       chi.Router
 	API          huma.API
@@ -48,29 +48,34 @@ type Server struct {
 var errorFactoryOnce sync.Once
 
 // New регистрирует API и middleware; HTTP-сервер запускается отдельно методом Serve.
-func New(a *auth.Service, j *jobs.Service, c *config.Config, l *slog.Logger) (*Server, error) {
-	k, e := kgo.NewClient(kgo.SeedBrokers(c.Kafka.Brokers...))
-	if e != nil {
-		return nil, e
+func New(
+	serviceValue *auth.Service,
+	service *jobs.Service,
+	config *appconfig.Config,
+	logger *slog.Logger,
+) (*Server, error) {
+	key, err := kgo.NewClient(kgo.SeedBrokers(config.Kafka.Brokers...))
+	if err != nil {
+		return nil, err
 	}
 	lifetime, stopRealtime := context.WithCancel(context.Background())
-	s := &Server{
+	server := &Server{
 		lifetime:     lifetime,
 		stopRealtime: stopRealtime,
-		Auth:         a,
-		Jobs:         j,
-		Config:       c,
-		Log:          l,
-		Kafka:        k,
+		Auth:         serviceValue,
+		Jobs:         service,
+		Config:       config,
+		Log:          logger,
+		Kafka:        key,
 		wsSlots:      make(chan struct{}, 128),
 	}
-	r := chi.NewRouter()
-	s.Router = r
-	r.Use(s.securityMiddleware)
-	r.Use(
+	reader := chi.NewRouter()
+	server.Router = reader
+	reader.Use(server.securityMiddleware)
+	reader.Use(
 		cors.Handler(
 			cors.Options{
-				AllowedOrigins:   c.HTTPServer.AllowedOrigins,
+				AllowedOrigins:   config.HTTPServer.AllowedOrigins,
 				AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 				AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 				ExposedHeaders:   []string{"X-Request-ID", "Retry-After", "Content-Disposition"},
@@ -96,9 +101,9 @@ func New(a *auth.Service, j *jobs.Service, c *config.Config, l *slog.Logger) (*S
 				if err == nil {
 					continue
 				}
-				if d, ok := err.(huma.ErrorDetailer); ok {
-					v := d.ErrorDetail()
-					details = append(details, &huma.ErrorDetail{Message: v.Message, Location: v.Location})
+				if data, ok := err.(huma.ErrorDetailer); ok {
+					value := data.ErrorDetail()
+					details = append(details, &huma.ErrorDetail{Message: value.Message, Location: value.Location})
 				} else {
 					details = append(details, &huma.ErrorDetail{Message: "invalid input"})
 				}
@@ -106,139 +111,144 @@ func New(a *auth.Service, j *jobs.Service, c *config.Config, l *slog.Logger) (*S
 			return &huma.ErrorModel{Status: status, Title: http.StatusText(status), Detail: msg, Errors: details}
 		}
 	})
-	s.API = humachi.New(r, cfg)
-	r.Get("/docs", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, docsHTML)
+	server.API = humachi.New(reader, cfg)
+	reader.Get("/docs", func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(response, docsHTML)
 	})
-	r.Handle("/docs/*", http.StripPrefix("/docs/", http.FileServer(http.FS(swaggerFiles.FS))))
-	s.registerAuth()
-	s.registerAdmin()
-	s.registerJobs()
-	s.registerRealtime()
-	r.Get(
+	reader.Handle("/docs/*", http.StripPrefix("/docs/", http.FileServer(http.FS(swaggerFiles.FS))))
+	server.registerAuth()
+	server.registerAdmin()
+	server.registerJobs()
+	server.registerRealtime()
+	reader.Get(
 		"/health/live",
-		func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) },
+		func(response http.ResponseWriter, request *http.Request) {
+			writeJSON(response, 200, map[string]string{"status": "ok"})
+		},
 	)
-	r.Get("/health/ready", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	reader.Get("/health/ready", func(response http.ResponseWriter, request *http.Request) {
+		ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
 		defer cancel()
-		if e := a.DB.Pool.Ping(ctx); e != nil {
-			s.rawError(w, r, a.Failure(ctx, "readiness postgres", e))
+		if err := serviceValue.DB.Pool.Ping(ctx); err != nil {
+			server.rawError(response, request, serviceValue.Failure(ctx, "readiness postgres", err))
 			return
 		}
-		if e := a.Redis.Ping(ctx).Err(); e != nil {
-			s.rawError(w, r, a.Failure(ctx, "readiness redis", e))
+		if err := serviceValue.Redis.Ping(ctx).Err(); err != nil {
+			server.rawError(response, request, serviceValue.Failure(ctx, "readiness redis", err))
 			return
 		}
-		writeJSON(w, 200, map[string]string{"status": "ready"})
+		writeJSON(response, 200, map[string]string{"status": "ready"})
 	})
-	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
-		s.rawError(w, r, huma.Error404NotFound("route not found"))
+	reader.NotFound(func(response http.ResponseWriter, request *http.Request) {
+		server.rawError(response, request, huma.Error404NotFound("route not found"))
 	})
-	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
-		s.rawError(w, r, huma.NewError(405, "method not allowed"))
+	reader.MethodNotAllowed(func(response http.ResponseWriter, request *http.Request) {
+		server.rawError(response, request, huma.NewError(405, "method not allowed"))
 	})
-	return s, nil
+	return server, nil
 }
 
 // Close завершает подписки WebSocket и закрывает клиент Kafka.
-func (s *Server) Close() {
-	s.stopRealtime()
-	s.Kafka.Close()
+func (server *Server) Close() {
+	server.stopRealtime()
+	server.Kafka.Close()
 }
 
 // Serve обслуживает HTTP до отмены контекста, затем завершает соединения с ограниченным ожиданием.
-func (s *Server) Serve(ctx context.Context) error {
+func (server *Server) Serve(ctx context.Context) error {
 	srv := &http.Server{
-		Addr:              s.Config.HTTPServer.Address,
-		Handler:           s.Router,
+		Addr:              server.Config.HTTPServer.Address,
+		Handler:           server.Router,
 		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       s.Config.HTTPServer.IdleTimeout,
+		IdleTimeout:       server.Config.HTTPServer.IdleTimeout,
 		MaxHeaderBytes:    32 << 10,
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 	select {
-	case e := <-errCh:
-		if !errors.Is(e, http.ErrServerClosed) {
-			return e
+	case err := <-errCh:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
 		}
 		return nil
 	case <-ctx.Done():
-		s.stopRealtime()
+		server.stopRealtime()
 		shutdown, stop := context.WithTimeout(context.Background(), 15*time.Second)
 		defer stop()
-		if e := srv.Shutdown(shutdown); e != nil {
+		if err := srv.Shutdown(shutdown); err != nil {
 			srv.Close()
-			return e
+			return err
 		}
 		return nil
 	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+func writeJSON(response http.ResponseWriter, status int, value any) {
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(status)
+	_ = json.NewEncoder(response).Encode(value)
 }
 
-func (s *Server) rawError(w http.ResponseWriter, r *http.Request, e error) {
+func (server *Server) rawError(response http.ResponseWriter, request *http.Request, err error) {
 	status := 500
 	var se huma.StatusError
-	if errors.As(e, &se) {
+	if errors.As(err, &se) {
 		status = se.GetStatus()
 	} else {
-		s.Log.ErrorContext(r.Context(), "HTTP request failed", "request_id", auth.RequestID(r.Context()), "error", e)
+		server.Log.ErrorContext(
+			request.Context(), "HTTP request failed",
+			"request_id", auth.RequestID(request.Context()), "error", err,
+		)
 	}
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(status)
+	response.Header().Set("Content-Type", "application/problem+json")
+	response.WriteHeader(status)
 	msg := http.StatusText(status)
 	if se != nil {
 		msg = se.Error()
 	}
-	_ = json.NewEncoder(w).Encode(&huma.ErrorModel{Status: status, Title: http.StatusText(status), Detail: msg})
+	_ = json.NewEncoder(response).Encode(&huma.ErrorModel{Status: status, Title: http.StatusText(status), Detail: msg})
 }
 
-func (s *Server) require(role auth.Role) func(huma.Context, func(huma.Context)) {
+func (server *Server) require(role auth.Role) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		raw := ctx.Header("Authorization")
 		if !strings.HasPrefix(raw, "Bearer ") {
-			_ = huma.WriteErr(s.API, ctx, 401, "bearer token required")
+			_ = huma.WriteErr(server.API, ctx, 401, "bearer token required")
 			return
 		}
-		p, e := s.Auth.Authenticate(ctx.Context(), strings.TrimPrefix(raw, "Bearer "), role)
-		if e != nil {
-			_ = huma.WriteErr(s.API, ctx, statusOf(e), e.Error())
+		principal, err := server.Auth.Authenticate(ctx.Context(), strings.TrimPrefix(raw, "Bearer "), role)
+		if err != nil {
+			_ = huma.WriteErr(server.API, ctx, statusOf(err), err.Error())
 			return
 		}
-		next(huma.WithContext(ctx, auth.WithPrincipal(ctx.Context(), p)))
+		next(huma.WithContext(ctx, auth.WithPrincipal(ctx.Context(), principal)))
 	}
 }
 
-func statusOf(e error) int {
+func statusOf(err error) int {
 	var se huma.StatusError
-	if errors.As(e, &se) {
+	if errors.As(err, &se) {
 		return se.GetStatus()
 	}
 	return 500
 }
 
-func (s *Server) rawAdmin(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
-	raw := r.Header.Get("Authorization")
+func (server *Server) rawAdmin(response http.ResponseWriter, request *http.Request) (*http.Request, bool) {
+	raw := request.Header.Get("Authorization")
 	if !strings.HasPrefix(raw, "Bearer ") {
-		s.rawError(w, r, huma.Error401Unauthorized("bearer token required"))
-		return r, false
+		server.rawError(response, request, huma.Error401Unauthorized("bearer token required"))
+		return request, false
 	}
-	p, e := s.Auth.Authenticate(r.Context(), strings.TrimPrefix(raw, "Bearer "), auth.Admin)
-	if e != nil {
-		s.rawError(w, r, e)
-		return r, false
+	principal, err := server.Auth.Authenticate(request.Context(), strings.TrimPrefix(raw, "Bearer "), auth.Admin)
+	if err != nil {
+		server.rawError(response, request, err)
+		return request, false
 	}
-	return r.WithContext(auth.WithPrincipal(r.Context(), p)), true
+	return request.WithContext(auth.WithPrincipal(request.Context(), principal)), true
 }
 
-func (s *Server) op(method, path, id, summary string, role auth.Role) huma.Operation {
+func (server *Server) op(method, path, id, summary string, role auth.Role) huma.Operation {
 	op := huma.Operation{
 		Method:          method,
 		Path:            path,
@@ -246,32 +256,32 @@ func (s *Server) op(method, path, id, summary string, role auth.Role) huma.Opera
 		Summary:         summary,
 		Tags:            operationTags(path),
 		MaxBodyBytes:    64 << 10,
-		BodyReadTimeout: s.Config.HTTPServer.Timeout,
+		BodyReadTimeout: server.Config.HTTPServer.Timeout,
 	}
 	if role != "" {
 		op.Security = []map[string][]string{{"bearer": {}}}
-		op.Middlewares = huma.Middlewares{s.require(role)}
+		op.Middlewares = huma.Middlewares{server.require(role)}
 	}
 	return op
 }
 
-func (s *Server) clientIP(r *http.Request) string {
-	host, _, e := net.SplitHostPort(r.RemoteAddr)
-	if e != nil {
-		host = r.RemoteAddr
+func (server *Server) clientIP(request *http.Request) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err != nil {
+		host = request.RemoteAddr
 	}
-	if !matchesCIDR(host, s.Config.HTTPServer.TrustedProxies) {
+	if !matchesCIDR(host, server.Config.HTTPServer.TrustedProxies) {
 		return host
 	}
 	// Проверяем цепочку от ближайшего прокси: клиент может сам подставить левое значение.
-	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	parts := strings.Split(request.Header.Get("X-Forwarded-For"), ",")
 	current := host
-	for i := len(parts) - 1; i >= 0; i-- {
-		if !matchesCIDR(current, s.Config.HTTPServer.TrustedProxies) {
+	for index := len(parts) - 1; index >= 0; index-- {
+		if !matchesCIDR(current, server.Config.HTTPServer.TrustedProxies) {
 			break
 		}
-		candidate := strings.TrimSpace(parts[i])
-		if _, e := netip.ParseAddr(candidate); e != nil {
+		candidate := strings.TrimSpace(parts[index])
+		if _, err := netip.ParseAddr(candidate); err != nil {
 			break
 		}
 		current = candidate
@@ -280,38 +290,38 @@ func (s *Server) clientIP(r *http.Request) string {
 }
 
 func matchesCIDR(ip string, cidrs []string) bool {
-	address, e := netip.ParseAddr(ip)
-	if e != nil {
+	address, err := netip.ParseAddr(ip)
+	if err != nil {
 		return false
 	}
 	address = address.Unmap()
-	for _, v := range cidrs {
-		p, e := netip.ParsePrefix(v)
-		if e == nil && p.Contains(address) {
+	for _, value := range cidrs {
+		parts, err := netip.ParsePrefix(value)
+		if err == nil && parts.Contains(address) {
 			return true
 		}
 	}
 	return false
 }
 
-func (s *Server) originAllowed(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
+func (server *Server) originAllowed(request *http.Request) bool {
+	origin := request.Header.Get("Origin")
 	if origin == "" {
 		return true
 	}
-	u, e := url.Parse(origin)
-	if e != nil || u.Host == "" {
+	parsedURL, err := url.Parse(origin)
+	if err != nil || parsedURL.Host == "" {
 		return false
 	}
 	scheme := "http"
-	if r.TLS != nil {
+	if request.TLS != nil {
 		scheme = "https"
 	}
 	// Заголовок Host задаёт клиент, поэтому сам по себе он не подтверждает доверенный Origin.
-	if r.Host == s.Config.HTTPServer.Address && origin == scheme+"://"+r.Host {
+	if request.Host == server.Config.HTTPServer.Address && origin == scheme+"://"+request.Host {
 		return true
 	}
-	for _, allowed := range s.Config.HTTPServer.AllowedOrigins {
+	for _, allowed := range server.Config.HTTPServer.AllowedOrigins {
 		if subtle.ConstantTimeCompare([]byte(origin), []byte(allowed)) == 1 {
 			return true
 		}
@@ -319,109 +329,116 @@ func (s *Server) originAllowed(r *http.Request) bool {
 	return false
 }
 
-func (s *Server) securityMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func (server *Server) securityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		started := time.Now()
 		id := uuid.NewString()
-		r = r.WithContext(auth.WithRequestID(r.Context(), id))
-		w.Header().Set("X-Request-ID", id)
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().
+		request = request.WithContext(auth.WithRequestID(request.Context(), id))
+		response.Header().Set("X-Request-ID", id)
+		response.Header().Set("X-Content-Type-Options", "nosniff")
+		response.Header().Set("X-Frame-Options", "DENY")
+		response.Header().Set("Referrer-Policy", "no-referrer")
+		response.Header().Set("Cache-Control", "no-store")
+		response.Header().
 			Set("Content-Security-Policy",
 				"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' "+
 					"'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
-		if s.Config.Auth.CookieSecure {
-			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		if server.Config.Auth.CookieSecure {
+			response.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}
 		defer func() {
-			if v := recover(); v != nil {
-				s.Log.Error("HTTP panic", "request_id", id, "stack", string(debug.Stack()))
-				s.rawError(w, r, huma.Error500InternalServerError("internal server error"))
+			if value := recover(); value != nil {
+				server.Log.Error("HTTP panic", "request_id", id, "stack", string(debug.Stack()))
+				server.rawError(response, request, huma.Error500InternalServerError("internal server error"))
 			}
-			s.Log.Info(
+			server.Log.Info(
 				"HTTP request",
 				"request_id",
 				id,
 				"method",
-				r.Method,
+				request.Method,
 				"path",
-				r.URL.Path,
+				request.URL.Path,
 				"duration",
 				time.Since(started),
 			)
 		}()
-		if strings.Contains(r.URL.Path, "/auth/") {
+		if strings.Contains(request.URL.Path, "/auth/") {
 			counts := map[string]int{}
-			for _, cookie := range r.Cookies() {
+			for _, cookie := range request.Cookies() {
 				if cookie.Name == "user_refresh" || cookie.Name == "admin_refresh" {
 					counts[cookie.Name]++
 					if counts[cookie.Name] > 1 {
-						s.rawError(w, r, huma.Error400BadRequest("duplicate refresh cookie"))
+						server.rawError(response, request, huma.Error400BadRequest("duplicate refresh cookie"))
 						return
 					}
 				}
 			}
 		}
-		if r.URL.Path == "/health/live" || r.URL.Path == "/health/ready" {
-			next.ServeHTTP(w, r)
+		if request.URL.Path == "/health/live" || request.URL.Path == "/health/ready" {
+			next.ServeHTTP(response, request)
 			return
 		}
-		if !s.originAllowed(r) {
-			s.rawError(w, r, huma.Error403Forbidden("origin is not allowed"))
+		if !server.originAllowed(request) {
+			server.rawError(response, request, huma.Error403Forbidden("origin is not allowed"))
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/docs") || strings.HasPrefix(r.URL.Path, "/openapi") {
-			if len(s.Config.HTTPServer.DocsAllowedCIDRs) > 0 &&
-				!matchesCIDR(s.clientIP(r), s.Config.HTTPServer.DocsAllowedCIDRs) {
-				s.rawError(w, r, huma.Error403Forbidden("documentation is not available from this address"))
+		if strings.HasPrefix(request.URL.Path, "/docs") || strings.HasPrefix(request.URL.Path, "/openapi") {
+			if len(server.Config.HTTPServer.DocsAllowedCIDRs) > 0 &&
+				!matchesCIDR(server.clientIP(request), server.Config.HTTPServer.DocsAllowedCIDRs) {
+				server.rawError(
+					response,
+					request,
+					huma.Error403Forbidden("documentation is not available from this address"),
+				)
 				return
 			}
 		}
-		rateCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		allowed, e := security.Allow(
+		rateCtx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+		allowed, err := security.Allow(
 			rateCtx,
-			s.Auth.Redis,
-			s.Config.Redis.Prefix,
-			"http:"+s.clientIP(r),
-			s.Config.HTTPServer.RatePerMinute,
+			server.Auth.Redis,
+			server.Config.Redis.Prefix,
+			"http:"+server.clientIP(request),
+			server.Config.HTTPServer.RatePerMinute,
 			time.Minute,
 		)
 		cancel()
-		if e != nil {
-			s.rawError(w, r, s.Auth.Failure(r.Context(), "global rate limit", e))
+		if err != nil {
+			server.rawError(response, request, server.Auth.Failure(request.Context(), "global rate limit", err))
 			return
 		}
 		if !allowed {
-			w.Header().Set("Retry-After", "60")
-			s.rawError(w, r, huma.Error429TooManyRequests("rate limit exceeded"))
+			response.Header().Set("Retry-After", "60")
+			server.rawError(response, request, huma.Error429TooManyRequests("rate limit exceeded"))
 			return
 		}
-		if r.Method == "POST" &&
-			(strings.Contains(r.URL.Path, "/auth/") || strings.HasSuffix(r.URL.Path, "/ws-tickets")) {
-			if e = s.Auth.Limit(r.Context(), "sensitive-ip:"+s.clientIP(r), 30, time.Minute); e != nil {
-				s.rawError(w, r, e)
+		if request.Method == "POST" &&
+			(strings.Contains(request.URL.Path, "/auth/") || strings.HasSuffix(request.URL.Path, "/ws-tickets")) {
+			err = server.Auth.Limit(request.Context(), "sensitive-ip:"+server.clientIP(request), 30, time.Minute)
+			if err != nil {
+				server.rawError(response, request, err)
 				return
 			}
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/v1/admin/imports/") {
-			if e = s.Auth.Limit(r.Context(), "upload:"+s.clientIP(r), 2, time.Minute); e != nil {
-				s.rawError(w, r, e)
+		if strings.HasPrefix(request.URL.Path, "/api/v1/admin/imports/") {
+			err = server.Auth.Limit(request.Context(), "upload:"+server.clientIP(request), 2, time.Minute)
+			if err != nil {
+				server.rawError(response, request, err)
 				return
 			}
-		} else if !strings.HasSuffix(r.URL.Path, "/ws") {
-			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		} else if !strings.HasSuffix(request.URL.Path, "/ws") {
+			request.Body = http.MaxBytesReader(response, request.Body, 64<<10)
 		}
-		if !strings.HasSuffix(r.URL.Path, "/ws") && !strings.HasPrefix(r.URL.Path, "/api/v1/admin/imports/") &&
-			!strings.HasSuffix(r.URL.Path, "/download") &&
-			!strings.HasSuffix(r.URL.Path, "/report") {
-			ctx, cancel := context.WithTimeout(r.Context(), s.Config.HTTPServer.Timeout)
+		if !strings.HasSuffix(request.URL.Path, "/ws") &&
+			!strings.HasPrefix(request.URL.Path, "/api/v1/admin/imports/") &&
+			!strings.HasSuffix(request.URL.Path, "/download") &&
+			!strings.HasSuffix(request.URL.Path, "/report") {
+			ctx, cancel := context.WithTimeout(request.Context(), server.Config.HTTPServer.Timeout)
 			defer cancel()
-			r = r.WithContext(ctx)
+			request = request.WithContext(ctx)
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(response, request)
 	})
 }
 

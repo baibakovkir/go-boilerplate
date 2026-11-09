@@ -20,7 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 
-	"go-boilerplate/internal/config"
+	appconfig "go-boilerplate/internal/config"
 	"go-boilerplate/internal/database"
 	"go-boilerplate/internal/database/dbgen"
 	appmail "go-boilerplate/internal/mail"
@@ -65,14 +65,14 @@ type Principal struct {
 type principalKey struct{}
 
 // WithPrincipal добавляет проверенного владельца сессии в контекст запроса.
-func WithPrincipal(ctx context.Context, p *Principal) context.Context {
-	return context.WithValue(ctx, principalKey{}, p)
+func WithPrincipal(ctx context.Context, principal *Principal) context.Context {
+	return context.WithValue(ctx, principalKey{}, principal)
 }
 
 // Current возвращает владельца сессии или nil, если middleware ещё не проверил авторизацию.
 func Current(ctx context.Context) *Principal {
-	p, _ := ctx.Value(principalKey{}).(*Principal)
-	return p
+	principal, _ := ctx.Value(principalKey{}).(*Principal)
+	return principal
 }
 
 // Tokens содержит результат входа; refresh передаётся только через HttpOnly cookie.
@@ -97,67 +97,81 @@ type Claims struct {
 type Service struct {
 	DB     *database.Store
 	Redis  *redis.Client
-	Config *config.Config
+	Config *appconfig.Config
 	Mail   appmail.Sender
 	Log    *slog.Logger
 	dummy  string
 }
 
 // New создаёт сервис авторизации и заранее подготавливает хеш для проверки неизвестного аккаунта.
-func New(db *database.Store, r *redis.Client, c *config.Config, m appmail.Sender, l *slog.Logger) *Service {
+func New(
+	db *database.Store,
+	redisClient *redis.Client,
+	config *appconfig.Config,
+	message appmail.Sender,
+	logger *slog.Logger,
+) *Service {
 	dummy, _ := security.HashPassword(security.RandomToken())
-	return &Service{db, r, c, m, l, dummy}
+	return &Service{db, redisClient, config, message, logger, dummy}
 }
-func (s *Service) key(suffix string) string { return s.Config.Redis.Prefix + suffix }
+func (service *Service) key(suffix string) string { return service.Config.Redis.Prefix + suffix }
 
 // Digest возвращает SHA-256 секрета для хранения и поиска без записи исходного токена.
-func Digest(s string) string {
-	v := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(v[:])
+func Digest(value string) string {
+	digestBytes := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digestBytes[:])
 }
 
 // Failure записывает внутреннюю причину с request ID и возвращает клиенту обезличенную ошибку 503.
-func (s *Service) Failure(ctx context.Context, op string, e error) error {
-	s.Log.ErrorContext(ctx, op, "request_id", RequestID(ctx), "error", e)
+func (service *Service) Failure(ctx context.Context, op string, err error) error {
+	service.Log.ErrorContext(ctx, op, "request_id", RequestID(ctx), "error", err)
 	return huma.Error503ServiceUnavailable("service temporarily unavailable")
 }
 
 // Account загружает аккаунт из таблицы, соответствующей указанной роли.
-func (s *Service) Account(ctx context.Context, role Role, id uuid.UUID) (Account, error) {
+func (service *Service) Account(ctx context.Context, role Role, id uuid.UUID) (Account, error) {
 	if role == Admin {
-		v, e := s.DB.Q.GetAdmin(ctx, id)
+		value, err := service.DB.Queries.GetAdmin(ctx, id)
 		return Account{
-			PublicAccount{v.ID, v.Email, v.Blocked, v.CreatedAt, v.UpdatedAt},
-			v.PasswordHash,
-			v.AuthVersion,
-		}, e
+			PublicAccount{value.ID, value.Email, value.Blocked, value.CreatedAt, value.UpdatedAt},
+			value.PasswordHash,
+			value.AuthVersion,
+		}, err
 	}
-	v, e := s.DB.Q.GetUser(ctx, id)
-	return Account{PublicAccount{v.ID, v.Email, v.Blocked, v.CreatedAt, v.UpdatedAt}, v.PasswordHash, v.AuthVersion}, e
+	value, err := service.DB.Queries.GetUser(ctx, id)
+	return Account{
+		PublicAccount{value.ID, value.Email, value.Blocked, value.CreatedAt, value.UpdatedAt},
+		value.PasswordHash,
+		value.AuthVersion,
+	}, err
 }
 
-func (s *Service) accountByEmail(ctx context.Context, role Role, email string) (Account, error) {
+func (service *Service) accountByEmail(ctx context.Context, role Role, email string) (Account, error) {
 	if role == Admin {
-		v, e := s.DB.Q.GetAdminByEmail(ctx, email)
+		value, err := service.DB.Queries.GetAdminByEmail(ctx, email)
 		return Account{
-			PublicAccount{v.ID, v.Email, v.Blocked, v.CreatedAt, v.UpdatedAt},
-			v.PasswordHash,
-			v.AuthVersion,
-		}, e
+			PublicAccount{value.ID, value.Email, value.Blocked, value.CreatedAt, value.UpdatedAt},
+			value.PasswordHash,
+			value.AuthVersion,
+		}, err
 	}
-	v, e := s.DB.Q.GetUserByEmail(ctx, email)
-	return Account{PublicAccount{v.ID, v.Email, v.Blocked, v.CreatedAt, v.UpdatedAt}, v.PasswordHash, v.AuthVersion}, e
+	value, err := service.DB.Queries.GetUserByEmail(ctx, email)
+	return Account{
+		PublicAccount{value.ID, value.Email, value.Blocked, value.CreatedAt, value.UpdatedAt},
+		value.PasswordHash,
+		value.AuthVersion,
+	}, err
 }
 
 // Audit записывает событие аудита; сбой записи отражается в техническом логе.
-func (s *Service) Audit(ctx context.Context,
+func (service *Service) Audit(ctx context.Context,
 	role Role,
 	id string,
 	action dbgen.AuditAction,
 	object string,
 	result dbgen.AuditResult,
 ) {
-	if e := s.DB.Q.InsertAudit(ctx,
+	if err := service.DB.Queries.InsertAudit(ctx,
 		dbgen.InsertAuditParams{
 			ActorType: dbgen.ActorType(role),
 			ActorID:   id,
@@ -165,8 +179,8 @@ func (s *Service) Audit(ctx context.Context,
 			ObjectID:  object,
 			Result:    result,
 			RequestID: RequestID(ctx),
-		}); e != nil {
-		s.Log.ErrorContext(ctx, "write audit", "error", e, "action", action)
+		}); err != nil {
+		service.Log.ErrorContext(ctx, "write audit", "error", err, "action", action)
 	}
 }
 
@@ -179,15 +193,15 @@ func WithRequestID(ctx context.Context, id string) context.Context {
 
 // RequestID возвращает идентификатор запроса или пустую строку вне HTTP-контекста.
 func RequestID(ctx context.Context) string {
-	v, _ := ctx.Value(requestIDKey{}).(string)
-	return v
+	value, _ := ctx.Value(requestIDKey{}).(string)
+	return value
 }
 
 // Limit проверяет лимит Redis; при недоступности хранилища операция не допускается.
-func (s *Service) Limit(ctx context.Context, key string, n int, window time.Duration) error {
-	allowed, e := security.Allow(ctx, s.Redis, s.Config.Redis.Prefix, key, n, window)
-	if e != nil {
-		return s.Failure(ctx, "rate limiter", e)
+func (service *Service) Limit(ctx context.Context, key string, number int, window time.Duration) error {
+	allowed, err := security.Allow(ctx, service.Redis, service.Config.Redis.Prefix, key, number, window)
+	if err != nil {
+		return service.Failure(ctx, "rate limiter", err)
 	}
 	if !allowed {
 		return huma.Error429TooManyRequests("too many attempts; try again later")
@@ -195,85 +209,86 @@ func (s *Service) Limit(ctx context.Context, key string, n int, window time.Dura
 	return nil
 }
 
-func (s *Service) checkLogin(ctx context.Context, role Role, c Credentials) (Account, error) {
-	email := NormalizeEmail(c.Email)
-	if e := s.Limit(ctx, "login:"+string(role)+":"+email, s.Config.Auth.LoginLimit, 15*time.Minute); e != nil {
-		return Account{}, e
+func (service *Service) checkLogin(ctx context.Context, role Role, credentials Credentials) (Account, error) {
+	email := NormalizeEmail(credentials.Email)
+	err := service.Limit(ctx, "login:"+string(role)+":"+email, service.Config.Auth.LoginLimit, 15*time.Minute)
+	if err != nil {
+		return Account{}, err
 	}
-	a, e := s.accountByEmail(ctx, role, email)
-	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
-		return Account{}, s.Failure(ctx, "find account", e)
+	account, err := service.accountByEmail(ctx, role, email)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return Account{}, service.Failure(ctx, "find account", err)
 	}
-	hash := a.PasswordHash
-	if e != nil {
-		hash = s.dummy
+	hash := account.PasswordHash
+	if err != nil {
+		hash = service.dummy
 	}
-	valid := security.CheckPassword(hash, c.Password)
-	if e != nil || !valid || a.Blocked {
-		s.Audit(ctx, role, "", "auth.login", "", "denied")
+	valid := security.CheckPassword(hash, credentials.Password)
+	if err != nil || !valid || account.Blocked {
+		service.Audit(ctx, role, "", "auth.login", "", "denied")
 		return Account{}, huma.Error401Unauthorized("invalid credentials")
 	}
-	return a, nil
+	return account, nil
 }
 
 // Login проверяет пароль пользователя и создаёт новую сессию.
-func (s *Service) Login(ctx context.Context, c Credentials) (Tokens, error) {
-	a, e := s.checkLogin(ctx, User, c)
-	if e != nil {
-		return Tokens{}, e
+func (service *Service) Login(ctx context.Context, credentials Credentials) (Tokens, error) {
+	account, err := service.checkLogin(ctx, User, credentials)
+	if err != nil {
+		return Tokens{}, err
 	}
-	return s.issue(ctx, User, a)
+	return service.issue(ctx, User, account)
 }
 
 // AdminLogin проверяет пароль администратора и отправляет OTP без выдачи access JWT.
-func (s *Service) AdminLogin(ctx context.Context, c Credentials) (string, error) {
-	a, e := s.checkLogin(ctx, Admin, c)
-	if e != nil {
-		return "", e
+func (service *Service) AdminLogin(ctx context.Context, credentials Credentials) (string, error) {
+	account, err := service.checkLogin(ctx, Admin, credentials)
+	if err != nil {
+		return "", err
 	}
-	if e = s.Limit(ctx, "otp:send:"+a.ID.String(), 1, time.Minute); e != nil {
-		return "", e
+	if err = service.Limit(ctx, "otp:send:"+account.ID.String(), 1, time.Minute); err != nil {
+		return "", err
 	}
-	n, e := rand.Int(rand.Reader, big.NewInt(1000000))
-	if e != nil {
-		return "", s.Failure(ctx, "generate otp", e)
+	otpNumber, err := rand.Int(rand.Reader, big.NewInt(1000000))
+	if err != nil {
+		return "", service.Failure(ctx, "generate otp", err)
 	}
-	code := fmt.Sprintf("%06d", n.Int64())
-	id := security.RandomToken()
-	k := s.key("challenge:" + Digest(id))
-	ttl := s.Config.Auth.OTPTTL
-	e = s.Redis.HSet(ctx,
-		k,
+	code := fmt.Sprintf("%06d", otpNumber.Int64())
+	challengeID := security.RandomToken()
+	challengeKey := service.key("challenge:" + Digest(challengeID))
+	otpTTL := service.Config.Auth.OTPTTL
+	err = service.Redis.HSet(ctx,
+		challengeKey,
 		"hash",
-		s.otpHash(code),
+		service.otpHash(code),
 		"id",
-		a.ID.String(),
+		account.ID.String(),
 		"version",
-		a.Version,
+		account.Version,
 		"attempts",
-		s.Config.Auth.OTPAttempts).
+		service.Config.Auth.OTPAttempts).
 		Err()
-	if e == nil {
-		e = s.Redis.Expire(ctx, k, ttl).Err()
+	if err == nil {
+		err = service.Redis.Expire(ctx, challengeKey, otpTTL).Err()
 	}
-	if e != nil {
-		return "", s.Failure(ctx, "store otp", e)
+	if err != nil {
+		return "", service.Failure(ctx, "store otp", err)
 	}
-	message, e := appmail.SignInMessage(code, ttl)
-	if e == nil {
-		e = s.Mail.Send(ctx, a.Email, "Administrator sign-in code", message)
+	message, err := appmail.SignInMessage(code, otpTTL)
+	if err == nil {
+		err = service.Mail.Send(ctx, account.Email, "Administrator sign-in code", message)
 	}
-	if e != nil {
-		s.Redis.Del(ctx, k)
-		return "", s.Failure(ctx, "send otp", e)
+	if err != nil {
+		service.Redis.Del(ctx, challengeKey)
+		return "", service.Failure(ctx, "send otp", err)
 	}
-	return id, nil
+	return challengeID, nil
 }
 
-func (s *Service) otpHash(code string) string {
-	h := hmac.New(sha256.New, []byte(s.Config.Auth.JWTSecret))
-	h.Write([]byte("otp:" + code))
-	return hex.EncodeToString(h.Sum(nil))
+func (service *Service) otpHash(code string) string {
+	handler := hmac.New(sha256.New, []byte(service.Config.Auth.JWTSecret))
+	handler.Write([]byte("otp:" + code))
+	return hex.EncodeToString(handler.Sum(nil))
 }
 
 var consumeOTP = redis.NewScript(`
@@ -288,71 +303,74 @@ var consumeOTP = redis.NewScript(`
 `)
 
 // VerifyOTP одноразово погашает OTP и создаёт сессию после проверки актуальности аккаунта.
-func (s *Service) VerifyOTP(ctx context.Context, id, code string) (Tokens, error) {
-	v, e := consumeOTP.Run(ctx, s.Redis, []string{s.key("challenge:" + Digest(id))}, s.otpHash(code)).StringSlice()
-	if e != nil {
-		return Tokens{}, s.Failure(ctx, "verify otp", e)
+func (service *Service) VerifyOTP(ctx context.Context, id, code string) (Tokens, error) {
+	value, err := consumeOTP.Run(
+		ctx, service.Redis, []string{service.key("challenge:" + Digest(id))}, service.otpHash(code),
+	).
+		StringSlice()
+	if err != nil {
+		return Tokens{}, service.Failure(ctx, "verify otp", err)
 	}
-	if len(v) != 2 {
+	if len(value) != 2 {
 		return Tokens{}, huma.Error401Unauthorized("invalid or expired code")
 	}
-	uid, e := uuid.Parse(v[0])
-	if e != nil {
+	uid, err := uuid.Parse(value[0])
+	if err != nil {
 		return Tokens{}, huma.Error401Unauthorized("invalid challenge")
 	}
-	a, e := s.Account(ctx, Admin, uid)
-	if e != nil {
-		return Tokens{}, s.Failure(ctx, "load admin", e)
+	account, err := service.Account(ctx, Admin, uid)
+	if err != nil {
+		return Tokens{}, service.Failure(ctx, "load admin", err)
 	}
-	if a.Blocked || strconv.FormatInt(a.Version, 10) != v[1] {
+	if account.Blocked || strconv.FormatInt(account.Version, 10) != value[1] {
 		return Tokens{}, huma.Error401Unauthorized("challenge is no longer valid")
 	}
-	return s.issue(ctx, Admin, a)
+	return service.issue(ctx, Admin, account)
 }
 
-func (s *Service) ttl(role Role) (time.Duration, time.Duration) {
+func (service *Service) ttl(role Role) (time.Duration, time.Duration) {
 	if role == Admin {
-		return s.Config.Auth.AdminAccessTTL, s.Config.Auth.AdminRefreshTTL
+		return service.Config.Auth.AdminAccessTTL, service.Config.Auth.AdminRefreshTTL
 	}
-	return s.Config.Auth.UserAccessTTL, s.Config.Auth.UserRefreshTTL
+	return service.Config.Auth.UserAccessTTL, service.Config.Auth.UserRefreshTTL
 }
 
-func (s *Service) issue(ctx context.Context, role Role, a Account) (Tokens, error) {
-	_, ttl := s.ttl(role)
+func (service *Service) issue(ctx context.Context, role Role, account Account) (Tokens, error) {
+	_, ttl := service.ttl(role)
 	sid := uuid.NewString()
 	secret := security.RandomToken()
 	csrf := security.RandomToken()
-	k := s.key("session:" + sid)
-	pipe := s.Redis.TxPipeline()
+	key := service.key("session:" + sid)
+	pipe := service.Redis.TxPipeline()
 	pipe.HSet(
 		ctx,
-		k,
+		key,
 		"id",
-		a.ID.String(),
+		account.ID.String(),
 		"role",
 		string(role),
 		"version",
-		a.Version,
+		account.Version,
 		"hash",
 		Digest(secret),
 		"csrf",
 		csrf,
 	)
-	pipe.Expire(ctx, k, ttl)
-	if _, e := pipe.Exec(ctx); e != nil {
-		return Tokens{}, s.Failure(ctx, "create session", e)
+	pipe.Expire(ctx, key, ttl)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return Tokens{}, service.Failure(ctx, "create session", err)
 	}
-	t, e := s.sign(role, a, sid, csrf, sid+"."+secret, ttl)
-	if e != nil {
-		s.Redis.Del(ctx, k)
-		return Tokens{}, s.Failure(ctx, "sign token", e)
+	tokens, err := service.sign(role, account, sid, csrf, sid+"."+secret, ttl)
+	if err != nil {
+		service.Redis.Del(ctx, key)
+		return Tokens{}, service.Failure(ctx, "sign token", err)
 	}
-	s.Audit(ctx, role, a.ID.String(), "auth.login", sid, "success")
-	return t, nil
+	service.Audit(ctx, role, account.ID.String(), "auth.login", sid, "success")
+	return tokens, nil
 }
 
-func (s *Service) sign(role Role, a Account, sid, csrf, refresh string, ttl time.Duration) (Tokens, error) {
-	accessTTL, _ := s.ttl(role)
+func (service *Service) sign(role Role, account Account, sid, csrf, refresh string, ttl time.Duration) (Tokens, error) {
+	accessTTL, _ := service.ttl(role)
 	now := time.Now()
 	if ttl < accessTTL {
 		accessTTL = ttl
@@ -360,48 +378,48 @@ func (s *Service) sign(role Role, a Account, sid, csrf, refresh string, ttl time
 	claims := Claims{
 		role,
 		sid,
-		a.Version,
+		account.Version,
 		jwt.RegisteredClaims{
-			Issuer:    s.Config.Auth.Issuer,
-			Subject:   a.ID.String(),
+			Issuer:    service.Config.Auth.Issuer,
+			Subject:   account.ID.String(),
 			Audience:  jwt.ClaimStrings{string(role)},
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(accessTTL)),
 			ID:        uuid.NewString(),
 		},
 	}
-	token, e := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.Config.Auth.JWTSecret))
-	return Tokens{token, "Bearer", int64(accessTTL.Seconds()), csrf, refresh, ttl}, e
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(service.Config.Auth.JWTSecret))
+	return Tokens{token, "Bearer", int64(accessTTL.Seconds()), csrf, refresh, ttl}, err
 }
 
 func parseRefresh(raw string) (string, string, error) {
-	p := strings.Split(raw, ".")
-	if len(p) != 2 || len(p[1]) != 43 {
+	parts := strings.Split(raw, ".")
+	if len(parts) != 2 || len(parts[1]) != 43 {
 		return "", "", huma.Error401Unauthorized("invalid refresh token")
 	}
-	if _, e := uuid.Parse(p[0]); e != nil {
+	if _, err := uuid.Parse(parts[0]); err != nil {
 		return "", "", huma.Error401Unauthorized("invalid refresh token")
 	}
-	return p[0], p[1], nil
+	return parts[0], parts[1], nil
 }
 
-func (s *Service) refreshSession(
+func (service *Service) refreshSession(
 	ctx context.Context,
 	role Role,
 	raw string,
 ) (string, string, map[string]string, error) {
-	sid, secret, e := parseRefresh(raw)
-	if e != nil {
-		return "", "", nil, e
+	sid, secret, err := parseRefresh(raw)
+	if err != nil {
+		return "", "", nil, err
 	}
-	v, e := s.Redis.HGetAll(ctx, s.key("session:"+sid)).Result()
-	if e != nil {
-		return "", "", nil, s.Failure(ctx, "read session", e)
+	value, err := service.Redis.HGetAll(ctx, service.key("session:"+sid)).Result()
+	if err != nil {
+		return "", "", nil, service.Failure(ctx, "read session", err)
 	}
-	if v["role"] != string(role) {
+	if value["role"] != string(role) {
 		return "", "", nil, huma.Error401Unauthorized("invalid session")
 	}
-	return sid, secret, v, nil
+	return sid, secret, value, nil
 }
 
 var rotate = redis.NewScript(`
@@ -414,294 +432,298 @@ var rotate = redis.NewScript(`
 `)
 
 // Refresh атомарно заменяет refresh; повторное использование старого секрета отзывает сессию.
-func (s *Service) Refresh(ctx context.Context, role Role, raw, csrf string) (Tokens, error) {
-	sid, secret, v, e := s.refreshSession(ctx, role, raw)
-	if e != nil {
-		return Tokens{}, e
+func (service *Service) Refresh(ctx context.Context, role Role, raw, csrf string) (Tokens, error) {
+	sid, secret, value, err := service.refreshSession(ctx, role, raw)
+	if err != nil {
+		return Tokens{}, err
 	}
-	if csrf == "" || !hmac.Equal([]byte(v["csrf"]), []byte(csrf)) {
+	if csrf == "" || !hmac.Equal([]byte(value["csrf"]), []byte(csrf)) {
 		return Tokens{}, huma.Error403Forbidden("invalid CSRF token")
 	}
-	uid, e := uuid.Parse(v["id"])
-	if e != nil {
+	uid, err := uuid.Parse(value["id"])
+	if err != nil {
 		return Tokens{}, huma.Error401Unauthorized("invalid session")
 	}
-	a, e := s.Account(ctx, role, uid)
-	if e != nil {
-		if errors.Is(e, pgx.ErrNoRows) {
+	account, err := service.Account(ctx, role, uid)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return Tokens{}, huma.Error401Unauthorized("invalid session")
 		}
-		return Tokens{}, s.Failure(ctx, "refresh account", e)
+		return Tokens{}, service.Failure(ctx, "refresh account", err)
 	}
-	if a.Blocked || strconv.FormatInt(a.Version, 10) != v["version"] {
-		s.Redis.Del(ctx, s.key("session:"+sid))
+	if account.Blocked || strconv.FormatInt(account.Version, 10) != value["version"] {
+		service.Redis.Del(ctx, service.key("session:"+sid))
 		return Tokens{}, huma.Error401Unauthorized("session revoked")
 	}
 	next := security.RandomToken()
-	ms, e := rotate.Run(ctx, s.Redis, []string{s.key("session:" + sid)}, Digest(secret), Digest(next)).Int64()
-	if e != nil {
-		return Tokens{}, s.Failure(ctx, "rotate refresh", e)
+	ms, err := rotate.Run(ctx, service.Redis, []string{service.key("session:" + sid)}, Digest(secret), Digest(next)).
+		Int64()
+	if err != nil {
+		return Tokens{}, service.Failure(ctx, "rotate refresh", err)
 	}
 	if ms <= 0 {
 		return Tokens{}, huma.Error401Unauthorized("invalid or reused refresh token")
 	}
-	t, e := s.sign(role, a, sid, v["csrf"], sid+"."+next, time.Duration(ms)*time.Millisecond)
-	if e != nil {
-		return Tokens{}, s.Failure(ctx, "sign refresh", e)
+	tokens, err := service.sign(role, account, sid, value["csrf"], sid+"."+next, time.Duration(ms)*time.Millisecond)
+	if err != nil {
+		return Tokens{}, service.Failure(ctx, "sign refresh", err)
 	}
-	return t, nil
+	return tokens, nil
 }
 
 // CSRF возвращает привязанный к сессии CSRF-токен после проверки текущего refresh.
-func (s *Service) CSRF(ctx context.Context, role Role, raw string) (string, error) {
-	_, secret, v, e := s.refreshSession(ctx, role, raw)
-	if e != nil {
-		return "", e
+func (service *Service) CSRF(ctx context.Context, role Role, raw string) (string, error) {
+	_, secret, value, err := service.refreshSession(ctx, role, raw)
+	if err != nil {
+		return "", err
 	}
-	if !hmac.Equal([]byte(Digest(secret)), []byte(v["hash"])) {
+	if !hmac.Equal([]byte(Digest(secret)), []byte(value["hash"])) {
 		return "", huma.Error401Unauthorized("invalid refresh token")
 	}
-	return v["csrf"], nil
+	return value["csrf"], nil
 }
 
 // Logout проверяет refresh и CSRF, затем отзывает текущую сессию.
-func (s *Service) Logout(ctx context.Context, role Role, raw, csrf string) error {
-	sid, secret, v, e := s.refreshSession(ctx, role, raw)
-	if e != nil {
-		return e
+func (service *Service) Logout(ctx context.Context, role Role, raw, csrf string) error {
+	sid, secret, value, err := service.refreshSession(ctx, role, raw)
+	if err != nil {
+		return err
 	}
-	if csrf == "" || !hmac.Equal([]byte(csrf), []byte(v["csrf"])) {
+	if csrf == "" || !hmac.Equal([]byte(csrf), []byte(value["csrf"])) {
 		return huma.Error403Forbidden("invalid CSRF token")
 	}
-	if !hmac.Equal([]byte(Digest(secret)), []byte(v["hash"])) {
+	if !hmac.Equal([]byte(Digest(secret)), []byte(value["hash"])) {
 		return huma.Error401Unauthorized("invalid refresh token")
 	}
-	if e = s.Redis.Del(ctx, s.key("session:"+sid)).Err(); e != nil {
-		return s.Failure(ctx, "logout", e)
+	if err = service.Redis.Del(ctx, service.key("session:"+sid)).Err(); err != nil {
+		return service.Failure(ctx, "logout", err)
 	}
-	s.Audit(ctx, role, v["id"], "auth.logout", sid, "success")
+	service.Audit(ctx, role, value["id"], "auth.logout", sid, "success")
 	return nil
 }
 
 // Authenticate проверяет JWT, сессию Redis и текущую версию аккаунта в PostgreSQL.
-func (s *Service) Authenticate(ctx context.Context, raw string, role Role) (*Principal, error) {
+func (service *Service) Authenticate(ctx context.Context, raw string, role Role) (*Principal, error) {
 	claims := &Claims{}
-	_, e := jwt.ParseWithClaims(
+	_, err := jwt.ParseWithClaims(
 		raw,
 		claims,
-		func(t *jwt.Token) (any, error) { return []byte(s.Config.Auth.JWTSecret), nil },
+		func(tokens *jwt.Token) (any, error) { return []byte(service.Config.Auth.JWTSecret), nil },
 		jwt.WithValidMethods([]string{"HS256"}),
-		jwt.WithIssuer(s.Config.Auth.Issuer),
+		jwt.WithIssuer(service.Config.Auth.Issuer),
 		jwt.WithAudience(string(role)),
 		jwt.WithExpirationRequired(),
 	)
-	if e != nil || claims.Role != role {
+	if err != nil || claims.Role != role {
 		return nil, huma.Error401Unauthorized("invalid access token")
 	}
-	id, e := uuid.Parse(claims.Subject)
-	if e != nil {
+	id, err := uuid.Parse(claims.Subject)
+	if err != nil {
 		return nil, huma.Error401Unauthorized("invalid access token")
 	}
-	v, e := s.Redis.HGetAll(ctx, s.key("session:"+claims.SessionID)).Result()
-	if e != nil {
-		return nil, s.Failure(ctx, "validate session", e)
+	value, err := service.Redis.HGetAll(ctx, service.key("session:"+claims.SessionID)).Result()
+	if err != nil {
+		return nil, service.Failure(ctx, "validate session", err)
 	}
-	if v["id"] != id.String() || v["role"] != string(role) || v["version"] != strconv.FormatInt(claims.Version, 10) {
+	if value["id"] != id.String() || value["role"] != string(role) ||
+		value["version"] != strconv.FormatInt(claims.Version, 10) {
 		return nil, huma.Error401Unauthorized("session revoked")
 	}
-	a, e := s.Account(ctx, role, id)
-	if e != nil {
-		if errors.Is(e, pgx.ErrNoRows) {
+	account, err := service.Account(ctx, role, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, huma.Error401Unauthorized("account unavailable")
 		}
-		return nil, s.Failure(ctx, "validate account", e)
+		return nil, service.Failure(ctx, "validate account", err)
 	}
-	if a.Blocked || a.Version != claims.Version {
+	if account.Blocked || account.Version != claims.Version {
 		return nil, huma.Error401Unauthorized("session revoked")
 	}
 	return &Principal{
 		ID:        id,
 		Role:      role,
 		SessionID: claims.SessionID,
-		Version:   a.Version,
-		Account:   a.PublicAccount,
+		Version:   account.Version,
+		Account:   account.PublicAccount,
 		ExpiresAt: claims.ExpiresAt.Time,
 	}, nil
 }
 
 // ChangePassword проверяет текущий пароль и меняет его с отзывом всех сессий аккаунта.
-func (s *Service) ChangePassword(ctx context.Context, p *Principal, current, next string) error {
-	a, e := s.Account(ctx, p.Role, p.ID)
-	if e != nil {
-		return s.Failure(ctx, "load password", e)
+func (service *Service) ChangePassword(ctx context.Context, principal *Principal, current, next string) error {
+	account, err := service.Account(ctx, principal.Role, principal.ID)
+	if err != nil {
+		return service.Failure(ctx, "load password", err)
 	}
-	if !security.CheckPassword(a.PasswordHash, current) {
+	if !security.CheckPassword(account.PasswordHash, current) {
 		return huma.Error400BadRequest("current password is incorrect")
 	}
-	return s.setPassword(ctx, p.Role, a, next, "account.password_changed")
+	return service.setPassword(ctx, principal.Role, account, next, "account.password_changed")
 }
 
-func (s *Service) setPassword(ctx context.Context,
+func (service *Service) setPassword(ctx context.Context,
 	role Role,
-	a Account,
+	account Account,
 	password string,
 	action dbgen.AuditAction,
 ) error {
-	hash, e := security.HashPassword(password)
-	if e != nil {
-		return s.Failure(ctx, "hash password", e)
+	hash, err := security.HashPassword(password)
+	if err != nil {
+		return service.Failure(ctx, "hash password", err)
 	}
-	tx, e := s.DB.Pool.Begin(ctx)
-	if e != nil {
-		return s.Failure(ctx, "begin password update", e)
+	tx, err := service.DB.Pool.Begin(ctx)
+	if err != nil {
+		return service.Failure(ctx, "begin password update", err)
 	}
 	defer tx.Rollback(ctx)
-	q := dbgen.New(tx)
-	var n int64
+	queries := dbgen.New(tx)
+	var number int64
 	if role == Admin {
-		n, e = q.ChangeAdminPassword(
+		number, err = queries.ChangeAdminPassword(
 			ctx,
-			dbgen.ChangeAdminPasswordParams{ID: a.ID, PasswordHash: hash, AuthVersion: a.Version},
+			dbgen.ChangeAdminPasswordParams{ID: account.ID, PasswordHash: hash, AuthVersion: account.Version},
 		)
 	} else {
-		n,
-			e = q.ChangeUserPassword(ctx,
+		number,
+			err = queries.ChangeUserPassword(ctx,
 			dbgen.ChangeUserPasswordParams{
-				ID:           a.ID,
+				ID:           account.ID,
 				PasswordHash: hash,
-				AuthVersion:  a.Version,
+				AuthVersion:  account.Version,
 			})
 	}
-	if e != nil {
-		return s.Failure(ctx, "update password", e)
+	if err != nil {
+		return service.Failure(ctx, "update password", err)
 	}
-	if n != 1 {
+	if number != 1 {
 		return huma.Error409Conflict("account changed; try again")
 	}
-	if e = q.InsertAudit(ctx,
+	if err = queries.InsertAudit(ctx,
 		dbgen.InsertAuditParams{
 			ActorType: dbgen.ActorType(role),
-			ActorID:   a.ID.String(),
+			ActorID:   account.ID.String(),
 			Action:    action,
-			ObjectID:  a.ID.String(),
+			ObjectID:  account.ID.String(),
 			Result:    "success",
 			RequestID: RequestID(ctx),
-		}); e != nil {
-		return s.Failure(ctx, "audit password", e)
+		}); err != nil {
+		return service.Failure(ctx, "audit password", err)
 	}
-	if e = tx.Commit(ctx); e != nil {
-		return s.Failure(ctx, "commit password", e)
+	if err = tx.Commit(ctx); err != nil {
+		return service.Failure(ctx, "commit password", err)
 	}
 	return nil
 }
 
 // ForgotPassword отправляет одноразовый токен восстановления; отсутствие аккаунта не раскрывается.
-func (s *Service) ForgotPassword(ctx context.Context, role Role, email string) error {
+func (service *Service) ForgotPassword(ctx context.Context, role Role, email string) error {
 	email = NormalizeEmail(email)
-	if e := s.Limit(ctx, "reset:"+string(role)+":"+email, s.Config.Auth.EmailLimit, 15*time.Minute); e != nil {
-		return e
+	err := service.Limit(ctx, "reset:"+string(role)+":"+email, service.Config.Auth.EmailLimit, 15*time.Minute)
+	if err != nil {
+		return err
 	}
-	a, e := s.accountByEmail(ctx, role, email)
-	if errors.Is(e, pgx.ErrNoRows) {
+	account, err := service.accountByEmail(ctx, role, email)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
-	if e != nil {
-		return s.Failure(ctx, "find reset account", e)
+	if err != nil {
+		return service.Failure(ctx, "find reset account", err)
 	}
-	if a.Blocked {
+	if account.Blocked {
 		return nil
 	}
 	token := security.RandomToken()
-	value := a.ID.String() + ":" + strconv.FormatInt(a.Version, 10)
-	key := s.key("reset:" + string(role) + ":" + Digest(token))
-	if e = s.Redis.Set(ctx, key, value, s.Config.Auth.ResetTTL).Err(); e != nil {
-		return s.Failure(ctx, "store reset", e)
+	value := account.ID.String() + ":" + strconv.FormatInt(account.Version, 10)
+	key := service.key("reset:" + string(role) + ":" + Digest(token))
+	if err = service.Redis.Set(ctx, key, value, service.Config.Auth.ResetTTL).Err(); err != nil {
+		return service.Failure(ctx, "store reset", err)
 	}
-	message, e := appmail.PasswordResetMessage(token, s.Config.Auth.ResetTTL)
-	if e == nil {
-		e = s.Mail.Send(ctx, a.Email, "Password reset", message)
+	message, err := appmail.PasswordResetMessage(token, service.Config.Auth.ResetTTL)
+	if err == nil {
+		err = service.Mail.Send(ctx, account.Email, "Password reset", message)
 	}
-	if e != nil {
-		s.Redis.Del(ctx, key)
-		return s.Failure(ctx, "send reset", e)
+	if err != nil {
+		service.Redis.Del(ctx, key)
+		return service.Failure(ctx, "send reset", err)
 	}
 	return nil
 }
 
 // ResetPassword погашает токен восстановления и меняет пароль с отзывом всех сессий.
-func (s *Service) ResetPassword(ctx context.Context, role Role, token, password string) error {
-	v, e := s.Redis.GetDel(ctx, s.key("reset:"+string(role)+":"+Digest(token))).Result()
-	if errors.Is(e, redis.Nil) {
+func (service *Service) ResetPassword(ctx context.Context, role Role, token, password string) error {
+	value, err := service.Redis.GetDel(ctx, service.key("reset:"+string(role)+":"+Digest(token))).Result()
+	if errors.Is(err, redis.Nil) {
 		return huma.Error400BadRequest("invalid or expired reset token")
 	}
-	if e != nil {
-		return s.Failure(ctx, "consume reset", e)
+	if err != nil {
+		return service.Failure(ctx, "consume reset", err)
 	}
-	p := strings.Split(v, ":")
-	if len(p) != 2 {
+	parts := strings.Split(value, ":")
+	if len(parts) != 2 {
 		return huma.Error400BadRequest("invalid reset token")
 	}
-	id, e := uuid.Parse(p[0])
-	if e != nil {
+	id, err := uuid.Parse(parts[0])
+	if err != nil {
 		return huma.Error400BadRequest("invalid reset token")
 	}
-	a, e := s.Account(ctx, role, id)
-	if e != nil {
-		return s.Failure(ctx, "load reset account", e)
+	account, err := service.Account(ctx, role, id)
+	if err != nil {
+		return service.Failure(ctx, "load reset account", err)
 	}
-	if a.Blocked || strconv.FormatInt(a.Version, 10) != p[1] {
+	if account.Blocked || strconv.FormatInt(account.Version, 10) != parts[1] {
 		return huma.Error400BadRequest("reset token revoked")
 	}
-	return s.setPassword(ctx, role, a, password, "account.password_reset")
+	return service.setPassword(ctx, role, account, password, "account.password_reset")
 }
 
 // Seed создаёт отсутствующих администраторов из настроек, сохраняя пароли существующих.
-func Seed(ctx context.Context, db *database.Store, admins []config.AdminConfig) error {
-	for _, a := range admins {
-		a.Email = NormalizeEmail(a.Email)
-		if !ValidateCredentials(Credentials{a.Email, a.Password}) {
+func Seed(ctx context.Context, db *database.Store, admins []appconfig.AdminConfig) error {
+	for _, config := range admins {
+		config.Email = NormalizeEmail(config.Email)
+		if !ValidateCredentials(Credentials{config.Email, config.Password}) {
 			return fmt.Errorf("invalid configured administrator credentials")
 		}
-		_, e := db.Q.GetAdminByEmail(ctx, a.Email)
-		if e == nil {
+		_, err := db.Queries.GetAdminByEmail(ctx, config.Email)
+		if err == nil {
 			continue
 		}
-		if !errors.Is(e, pgx.ErrNoRows) {
-			return e
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
 		}
-		hash, e := security.HashPassword(a.Password)
-		if e != nil {
-			return e
+		hash, err := security.HashPassword(config.Password)
+		if err != nil {
+			return err
 		}
-		if e = db.Q.CreateAdmin(ctx,
+		if err = db.Queries.CreateAdmin(ctx,
 			dbgen.CreateAdminParams{
 				ID:           uuid.New(),
-				Email:        a.Email,
+				Email:        config.Email,
 				PasswordHash: hash,
-			}); e != nil {
-			return e
+			}); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 // ValidatePrincipal повторно проверяет срок и отзыв сессии для длительного WebSocket-соединения.
-func (s *Service) ValidatePrincipal(ctx context.Context, p *Principal) error {
-	if p == nil || time.Now().After(p.ExpiresAt) {
+func (service *Service) ValidatePrincipal(ctx context.Context, principal *Principal) error {
+	if principal == nil || time.Now().After(principal.ExpiresAt) {
 		return huma.Error401Unauthorized("access token expired")
 	}
-	v, e := s.Redis.HGetAll(ctx, s.key("session:"+p.SessionID)).Result()
-	if e != nil {
-		return s.Failure(ctx, "validate realtime session", e)
+	value, err := service.Redis.HGetAll(ctx, service.key("session:"+principal.SessionID)).Result()
+	if err != nil {
+		return service.Failure(ctx, "validate realtime session", err)
 	}
-	if v["id"] != p.ID.String() || v["role"] != string(p.Role) || v["version"] != strconv.FormatInt(p.Version, 10) {
+	if value["id"] != principal.ID.String() || value["role"] != string(principal.Role) ||
+		value["version"] != strconv.FormatInt(principal.Version, 10) {
 		return huma.Error401Unauthorized("session revoked")
 	}
-	a, e := s.Account(ctx, p.Role, p.ID)
-	if e != nil {
-		return s.Failure(ctx, "validate realtime account", e)
+	account, err := service.Account(ctx, principal.Role, principal.ID)
+	if err != nil {
+		return service.Failure(ctx, "validate realtime account", err)
 	}
-	if a.Blocked || a.Version != p.Version {
+	if account.Blocked || account.Version != principal.Version {
 		return huma.Error401Unauthorized("session revoked")
 	}
 	return nil

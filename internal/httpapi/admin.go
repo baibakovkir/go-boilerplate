@@ -57,162 +57,174 @@ type AuditEntry struct {
 	CreatedAt time.Time         `json:"created_at"`
 }
 
-func publicAudit(v dbgen.AuditLog) AuditEntry {
-	return AuditEntry{v.ID, v.ActorType, v.ActorID, v.Action, v.ObjectID, v.Result, v.RequestID, v.CreatedAt}
+func publicAudit(value dbgen.AuditLog) AuditEntry {
+	return AuditEntry{
+		value.ID,
+		value.ActorType,
+		value.ActorID,
+		value.Action,
+		value.ObjectID,
+		value.Result,
+		value.RequestID,
+		value.CreatedAt,
+	}
 }
 
-func (s *Server) listUsers(ctx context.Context, i UserListInput) ([]auth.PublicAccount, error) {
-	rows, e := s.Auth.DB.Q.ListUsers(
+func (server *Server) listUsers(ctx context.Context, input UserListInput) ([]auth.PublicAccount, error) {
+	rows, err := server.Auth.DB.Queries.ListUsers(
 		ctx,
 		dbgen.ListUsersParams{
-			Limit:         i.Limit,
-			Offset:        i.Offset,
-			EmailFilter:   auth.NormalizeEmail(i.Email),
-			BlockedFilter: i.Blocked,
+			Limit:         input.Limit,
+			Offset:        input.Offset,
+			EmailFilter:   auth.NormalizeEmail(input.Email),
+			BlockedFilter: input.Blocked,
 		},
 	)
-	if e != nil {
-		return nil, s.Auth.Failure(ctx, "list users", e)
+	if err != nil {
+		return nil, server.Auth.Failure(ctx, "list users", err)
 	}
 	items := make([]auth.PublicAccount, 0, len(rows))
-	for _, v := range rows {
+	for _, value := range rows {
 		items = append(
 			items,
 			auth.PublicAccount{
-				ID:        v.ID,
-				Email:     v.Email,
-				Blocked:   v.Blocked,
-				CreatedAt: v.CreatedAt,
-				UpdatedAt: v.UpdatedAt,
+				ID:        value.ID,
+				Email:     value.Email,
+				Blocked:   value.Blocked,
+				CreatedAt: value.CreatedAt,
+				UpdatedAt: value.UpdatedAt,
 			},
 		)
 	}
 	return items, nil
 }
 
-func (s *Server) registerAdmin() {
+func (server *Server) registerAdmin() {
 	huma.Register(
-		s.API,
-		s.op("GET", "/api/v1/admin/users", "admin-list-users", "List users", auth.Admin),
-		func(ctx context.Context, i *UserListInput) (*UserListOutput, error) {
-			items, e := s.listUsers(ctx, *i)
-			if e != nil {
-				return nil, e
+		server.API,
+		server.op("GET", "/api/v1/admin/users", "admin-list-users", "List users", auth.Admin),
+		func(ctx context.Context, input *UserListInput) (*UserListOutput, error) {
+			items, err := server.listUsers(ctx, *input)
+			if err != nil {
+				return nil, err
 			}
-			o := &UserListOutput{}
-			o.Body.Items = items
-			return o, nil
+			output := &UserListOutput{}
+			output.Body.Items = items
+			return output, nil
 		},
 	)
 	huma.Register(
-		s.API,
-		s.op("GET", "/api/v1/admin/users/{id}", "admin-get-user", "Get user", auth.Admin),
-		func(ctx context.Context, i *IDInput) (*struct{ Body auth.PublicAccount }, error) {
-			a, e := s.Auth.Account(ctx, auth.User, i.ID)
-			if errors.Is(e, pgx.ErrNoRows) {
+		server.API,
+		server.op("GET", "/api/v1/admin/users/{id}", "admin-get-user", "Get user", auth.Admin),
+		func(ctx context.Context, input *IDInput) (*struct{ Body auth.PublicAccount }, error) {
+			account, err := server.Auth.Account(ctx, auth.User, input.ID)
+			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, huma.Error404NotFound("user not found")
 			}
-			if e != nil {
-				return nil, s.Auth.Failure(ctx, "get user", e)
+			if err != nil {
+				return nil, server.Auth.Failure(ctx, "get user", err)
 			}
-			return &struct{ Body auth.PublicAccount }{a.PublicAccount}, nil
+			return &struct{ Body auth.PublicAccount }{account.PublicAccount}, nil
 		},
 	)
 	huma.Register(
-		s.API,
-		s.op(
+		server.API,
+		server.op(
 			"PATCH",
 			"/api/v1/admin/users/{id}/blocked",
 			"admin-block-user",
 			"Block/unblock user and revoke sessions",
 			auth.Admin,
 		),
-		func(ctx context.Context, i *struct {
+		func(ctx context.Context, input *struct {
 			IDInput
 			Body struct {
 				Blocked bool `json:"blocked"`
 			}
 		},
 		) (*MessageOutput, error) {
-			tx, e := s.Auth.DB.Pool.Begin(ctx)
-			if e != nil {
-				return nil, s.Auth.Failure(ctx, "begin block", e)
+			tx, err := server.Auth.DB.Pool.Begin(ctx)
+			if err != nil {
+				return nil, server.Auth.Failure(ctx, "begin block", err)
 			}
 			defer tx.Rollback(ctx)
-			q := dbgen.New(tx)
-			n, e := q.SetUserBlocked(ctx, dbgen.SetUserBlockedParams{ID: i.ID, Blocked: i.Body.Blocked})
-			if e != nil {
-				return nil, s.Auth.Failure(ctx, "block user", e)
+			queries := dbgen.New(tx)
+			number, err := queries.SetUserBlocked(
+				ctx,
+				dbgen.SetUserBlockedParams{ID: input.ID, Blocked: input.Body.Blocked},
+			)
+			if err != nil {
+				return nil, server.Auth.Failure(ctx, "block user", err)
 			}
-			if n == 0 {
+			if number == 0 {
 				return nil, huma.Error404NotFound("user not found")
 			}
 			action := dbgen.AuditActionUsersunblocked
-			if i.Body.Blocked {
+			if input.Body.Blocked {
 				action = dbgen.AuditActionUsersblocked
 			}
-			p := auth.Current(ctx)
-			if e = q.InsertAudit(ctx,
+			principal := auth.Current(ctx)
+			if err = queries.InsertAudit(ctx,
 				dbgen.InsertAuditParams{
 					ActorType: "admin",
-					ActorID:   p.ID.String(),
+					ActorID:   principal.ID.String(),
 					Action:    action,
-					ObjectID:  i.ID.String(),
+					ObjectID:  input.ID.String(),
 					Result:    "success",
 					RequestID: auth.RequestID(ctx),
-				}); e != nil {
-				return nil, s.Auth.Failure(ctx, "audit block", e)
+				}); err != nil {
+				return nil, server.Auth.Failure(ctx, "audit block", err)
 			}
-			if e = tx.Commit(ctx); e != nil {
-				return nil, s.Auth.Failure(ctx, "commit block", e)
+			if err = tx.Commit(ctx); err != nil {
+				return nil, server.Auth.Failure(ctx, "commit block", err)
 			}
 			return message("user updated; sessions revoked"), nil
 		},
 	)
 	huma.Register(
-		s.API,
-		s.op(
+		server.API,
+		server.op(
 			"DELETE",
 			"/api/v1/admin/users/{id}/sessions",
 			"admin-revoke-user-sessions",
 			"Revoke user sessions",
 			auth.Admin,
 		),
-		func(ctx context.Context, i *IDInput) (*MessageOutput, error) {
-			tx, e := s.Auth.DB.Pool.Begin(ctx)
-			if e != nil {
-				return nil, s.Auth.Failure(ctx, "begin revoke", e)
+		func(ctx context.Context, input *IDInput) (*MessageOutput, error) {
+			tx, err := server.Auth.DB.Pool.Begin(ctx)
+			if err != nil {
+				return nil, server.Auth.Failure(ctx, "begin revoke", err)
 			}
 			defer tx.Rollback(ctx)
-			q := dbgen.New(tx)
-			n, e := q.RevokeUserSessions(ctx, i.ID)
-			if e != nil {
-				return nil, s.Auth.Failure(ctx, "revoke user sessions", e)
+			queries := dbgen.New(tx)
+			number, err := queries.RevokeUserSessions(ctx, input.ID)
+			if err != nil {
+				return nil, server.Auth.Failure(ctx, "revoke user sessions", err)
 			}
-			if n == 0 {
+			if number == 0 {
 				return nil, huma.Error404NotFound("user not found")
 			}
-			if e = q.InsertAudit(ctx,
+			if err = queries.InsertAudit(ctx,
 				dbgen.InsertAuditParams{
 					ActorType: "admin",
 					ActorID:   auth.Current(ctx).ID.String(),
 					Action:    "users.sessions_revoked",
-					ObjectID:  i.ID.String(),
+					ObjectID:  input.ID.String(),
 					Result:    "success",
 					RequestID: auth.RequestID(ctx),
-				}); e != nil {
-				return nil, s.Auth.Failure(ctx, "audit revoke", e)
+				}); err != nil {
+				return nil, server.Auth.Failure(ctx, "audit revoke", err)
 			}
-			if e = tx.Commit(ctx); e != nil {
-				return nil, s.Auth.Failure(ctx, "commit revoke", e)
+			if err = tx.Commit(ctx); err != nil {
+				return nil, server.Auth.Failure(ctx, "commit revoke", err)
 			}
 			return message("sessions revoked"), nil
 		},
 	)
 	huma.Register(
-		s.API,
-		s.op("GET", "/api/v1/admin/audit", "admin-list-audit", "List audit events", auth.Admin),
-		func(ctx context.Context, i *struct {
+		server.API,
+		server.op("GET", "/api/v1/admin/audit", "admin-list-audit", "List audit events", auth.Admin),
+		func(ctx context.Context, input *struct {
 			Page
 			Action string `query:"action" maxLength:"100"`
 		}) (*struct {
@@ -221,36 +233,42 @@ func (s *Server) registerAdmin() {
 			}
 		}, error,
 		) {
-			rows, e := s.Auth.DB.Q.ListAudit(
+			rows, err := server.Auth.DB.Queries.ListAudit(
 				ctx,
-				dbgen.ListAuditParams{Limit: i.Limit, Offset: i.Offset, ActionFilter: i.Action},
+				dbgen.ListAuditParams{Limit: input.Limit, Offset: input.Offset, ActionFilter: input.Action},
 			)
-			if e != nil {
-				return nil, s.Auth.Failure(ctx, "list audit", e)
+			if err != nil {
+				return nil, server.Auth.Failure(ctx, "list audit", err)
 			}
-			o := &struct {
+			output := &struct {
 				Body struct {
 					Items []AuditEntry `json:"items"`
 				}
 			}{}
-			o.Body.Items = []AuditEntry{}
-			for _, v := range rows {
-				o.Body.Items = append(o.Body.Items, publicAudit(v))
+			output.Body.Items = []AuditEntry{}
+			for _, value := range rows {
+				output.Body.Items = append(output.Body.Items, publicAudit(value))
 			}
-			return o, nil
+			return output, nil
 		},
 	)
 	huma.Register(
-		s.API,
-		s.op("GET", "/api/v1/admin/tables", "admin-list-tables", "List permitted table projections", auth.Admin),
-		func(ctx context.Context, i *struct{}) (*struct{ Body []string }, error) {
+		server.API,
+		server.op("GET", "/api/v1/admin/tables", "admin-list-tables", "List permitted table projections", auth.Admin),
+		func(ctx context.Context, input *struct{}) (*struct{ Body []string }, error) {
 			return &struct{ Body []string }{[]string{"users", "jobs", "audit_logs"}}, nil
 		},
 	)
 	huma.Register(
-		s.API,
-		s.op("GET", "/api/v1/admin/tables/{table}", "admin-browse-table", "Browse a safe table projection", auth.Admin),
-		func(ctx context.Context, i *struct {
+		server.API,
+		server.op(
+			"GET",
+			"/api/v1/admin/tables/{table}",
+			"admin-browse-table",
+			"Browse a safe table projection",
+			auth.Admin,
+		),
+		func(ctx context.Context, input *struct {
 			Page
 			Table string `path:"table" enum:"users,jobs,audit_logs"`
 		}) (*struct {
@@ -260,46 +278,59 @@ func (s *Server) registerAdmin() {
 			}
 		}, error,
 		) {
-			o := &struct {
+			output := &struct {
 				Body struct {
 					Table string `json:"table"`
 					Rows  any    `json:"rows"`
 				}
 			}{}
-			o.Body.Table = i.Table
-			switch i.Table {
+			output.Body.Table = input.Table
+			switch input.Table {
 			case "users":
-				v, e := s.listUsers(ctx, UserListInput{Page: i.Page})
-				if e != nil {
-					return nil, e
+				account, err := server.listUsers(ctx, UserListInput{Page: input.Page})
+				if err != nil {
+					return nil, err
 				}
-				o.Body.Rows = v
+				output.Body.Rows = account
 			case "jobs":
-				v, e := s.Auth.DB.Q.ListJobs(ctx, dbgen.ListJobsParams{Limit: i.Limit, Offset: i.Offset})
-				if e != nil {
-					return nil, s.Auth.Failure(ctx, "browse jobs", e)
+				job, err := server.Auth.DB.Queries.ListJobs(
+					ctx,
+					dbgen.ListJobsParams{Limit: input.Limit, Offset: input.Offset},
+				)
+				if err != nil {
+					return nil, server.Auth.Failure(ctx, "browse jobs", err)
 				}
 				items := []jobs.Snapshot{}
-				for _, r := range v {
-					items = append(items, jobs.Public(r))
+				for _, job := range job {
+					items = append(items, jobs.Public(job))
 				}
-				o.Body.Rows = items
+				output.Body.Rows = items
 			case "audit_logs":
-				v, e := s.Auth.DB.Q.ListAudit(ctx, dbgen.ListAuditParams{Limit: i.Limit, Offset: i.Offset})
-				if e != nil {
-					return nil, s.Auth.Failure(ctx, "browse audit", e)
+				value, err := server.Auth.DB.Queries.ListAudit(
+					ctx,
+					dbgen.ListAuditParams{Limit: input.Limit, Offset: input.Offset},
+				)
+				if err != nil {
+					return nil, server.Auth.Failure(ctx, "browse audit", err)
 				}
 				items := []AuditEntry{}
-				for _, r := range v {
-					items = append(items, publicAudit(r))
+				for _, reader := range value {
+					items = append(items, publicAudit(reader))
 				}
-				o.Body.Rows = items
+				output.Body.Rows = items
 			}
-			s.Auth.Audit(ctx, auth.Admin, auth.Current(ctx).ID.String(), "admin.tables.viewed", i.Table, "success")
-			return o, nil
+			server.Auth.Audit(
+				ctx,
+				auth.Admin,
+				auth.Current(ctx).ID.String(),
+				"admin.tables.viewed",
+				input.Table,
+				"success",
+			)
+			return output, nil
 		},
 	)
-	s.registerKafka()
+	server.registerKafka()
 }
 
 // KafkaPartition описывает доступность, лидера и реплики партиции Kafka.
@@ -334,60 +365,60 @@ type KafkaOutput struct {
 	}
 }
 
-func (s *Server) registerKafka() {
+func (server *Server) registerKafka() {
 	huma.Register(
-		s.API,
-		s.op(
+		server.API,
+		server.op(
 			"GET",
 			"/api/v1/admin/kafka",
 			"admin-kafka-status",
 			"Inspect Kafka topics, partitions and consumer lag",
 			auth.Admin,
 		),
-		func(ctx context.Context, i *struct{}) (*KafkaOutput, error) {
+		func(ctx context.Context, input *struct{}) (*KafkaOutput, error) {
 			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
-			admin := kadm.NewClient(s.Kafka)
-			topics, e := admin.ListTopics(ctx)
-			if e != nil {
-				return nil, s.Auth.Failure(ctx, "list kafka topics", e)
+			admin := kadm.NewClient(server.Kafka)
+			topics, err := admin.ListTopics(ctx)
+			if err != nil {
+				return nil, server.Auth.Failure(ctx, "list kafka topics", err)
 			}
-			groups, e := admin.ListGroups(ctx)
-			if e != nil {
-				return nil, s.Auth.Failure(ctx, "list kafka groups", e)
+			groups, err := admin.ListGroups(ctx)
+			if err != nil {
+				return nil, server.Auth.Failure(ctx, "list kafka groups", err)
 			}
 			output := &KafkaOutput{}
 			output.Body.Topics = []KafkaTopic{}
 			output.Body.Groups = []KafkaGroup{}
 			for _, topic := range topics.Sorted() {
-				v := KafkaTopic{Name: topic.Topic, Available: topic.Err == nil, Partitions: []KafkaPartition{}}
-				for _, p := range topic.Partitions.Sorted() {
-					v.Partitions = append(
-						v.Partitions,
-						KafkaPartition{p.Partition, p.Leader, p.Replicas, p.ISR, p.Err == nil},
+				value := KafkaTopic{Name: topic.Topic, Available: topic.Err == nil, Partitions: []KafkaPartition{}}
+				for _, parts := range topic.Partitions.Sorted() {
+					value.Partitions = append(
+						value.Partitions,
+						KafkaPartition{parts.Partition, parts.Leader, parts.Replicas, parts.ISR, parts.Err == nil},
 					)
 				}
-				output.Body.Topics = append(output.Body.Topics, v)
+				output.Body.Topics = append(output.Body.Topics, value)
 			}
 			if len(groups) > 0 {
-				lags, e := admin.Lag(ctx, groups.Groups()...)
-				if e != nil {
-					return nil, s.Auth.Failure(ctx, "inspect kafka lag", e)
+				lags, err := admin.Lag(ctx, groups.Groups()...)
+				if err != nil {
+					return nil, server.Auth.Failure(ctx, "inspect kafka lag", err)
 				}
-				for _, g := range groups.Sorted() {
-					lag, ok := lags[g.Group]
+				for _, value := range groups.Sorted() {
+					lag, ok := lags[value.Group]
 					output.Body.Groups = append(
 						output.Body.Groups,
 						KafkaGroup{
-							Name:      g.Group,
-							State:     g.State,
+							Name:      value.Group,
+							State:     value.State,
 							Lag:       lag.Lag.Total(),
 							Available: ok && lag.Error() == nil,
 						},
 					)
 				}
 			}
-			s.Auth.Audit(ctx, auth.Admin, auth.Current(ctx).ID.String(), "admin.kafka.viewed", "", "success")
+			server.Auth.Audit(ctx, auth.Admin, auth.Current(ctx).ID.String(), "admin.kafka.viewed", "", "success")
 			return output, nil
 		},
 	)

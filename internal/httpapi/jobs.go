@@ -59,24 +59,24 @@ type JobErrorsOutput struct {
 	}
 }
 
-func (s *Server) registerJobs() {
-	op := s.op("POST", "/api/v1/admin/exports", "admin-create-export", "Export users asynchronously", auth.Admin)
+func (server *Server) registerJobs() {
+	op := server.op("POST", "/api/v1/admin/exports", "admin-create-export", "Export users asynchronously", auth.Admin)
 	op.DefaultStatus = 202
-	huma.Register(s.API, op, func(ctx context.Context, i *ExportInput) (*JobOutput, error) {
-		p := auth.Current(ctx)
-		if err := s.Auth.Limit(ctx, "export:"+p.ID.String(), 5, time.Minute); err != nil {
+	huma.Register(server.API, op, func(ctx context.Context, index *ExportInput) (*JobOutput, error) {
+		principal := auth.Current(ctx)
+		if err := server.Auth.Limit(ctx, "export:"+principal.ID.String(), 5, time.Minute); err != nil {
 			return nil, err
 		}
-		i.Body.Email = auth.NormalizeEmail(i.Body.Email)
-		j, err := usertasks.CreateExport(ctx, s.Jobs, jobs.ForPrincipal(p), i.Body)
+		index.Body.Email = auth.NormalizeEmail(index.Body.Email)
+		job, err := usertasks.CreateExport(ctx, server.Jobs, jobs.ForPrincipal(principal), index.Body)
 		if err != nil {
-			return nil, s.Auth.Failure(ctx, "create export", err)
+			return nil, server.Auth.Failure(ctx, "create export", err)
 		}
-		return &JobOutput{j}, nil
+		return &JobOutput{job}, nil
 	})
-	s.Router.Post("/api/v1/admin/imports/{format}", s.upload)
-	schema := s.API.OpenAPI().Components.Schemas.Schema(reflect.TypeFor[jobs.Snapshot](), true, "")
-	s.API.OpenAPI().AddOperation(&huma.Operation{
+	server.Router.Post("/api/v1/admin/imports/{format}", server.upload)
+	schema := server.API.OpenAPI().Components.Schemas.Schema(reflect.TypeFor[jobs.Snapshot](), true, "")
+	server.API.OpenAPI().AddOperation(&huma.Operation{
 		Method:      "POST",
 		Path:        "/api/v1/admin/imports/{format}",
 		OperationID: "admin-import-users",
@@ -120,101 +120,104 @@ func (s *Server) registerJobs() {
 			},
 		},
 	})
-	s.registerJobRoutes("/api/v1/admin/jobs", auth.Admin)
-	s.registerJobRoutes("/api/v1/jobs", auth.User)
+	server.registerJobRoutes("/api/v1/admin/jobs", auth.Admin)
+	server.registerJobRoutes("/api/v1/jobs", auth.User)
 }
 
-func (s *Server) visibleJob(ctx context.Context, id uuid.UUID) (dbgen.Job, error) {
-	j, err := s.Auth.DB.Q.GetJob(ctx, id)
+func (server *Server) visibleJob(ctx context.Context, id uuid.UUID) (dbgen.Job, error) {
+	job, err := server.Auth.DB.Queries.GetJob(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return j, huma.Error404NotFound("job not found")
+		return job, huma.Error404NotFound("job not found")
 	}
 	if err != nil {
-		return j, s.Auth.Failure(ctx, "get job", err)
+		return job, server.Auth.Failure(ctx, "get job", err)
 	}
-	if !jobs.CanRead(j, auth.Current(ctx)) {
-		return j, huma.Error404NotFound("job not found")
+	if !jobs.CanRead(job, auth.Current(ctx)) {
+		return job, huma.Error404NotFound("job not found")
 	}
-	return j, nil
+	return job, nil
 }
 
-func (s *Server) registerJobRoutes(base string, role auth.Role) {
-	huma.Register(s.API,
-		s.op("GET",
+func (server *Server) registerJobRoutes(base string, role auth.Role) {
+	huma.Register(server.API,
+		server.op("GET",
 			base,
 			string(role)+"-list-jobs",
 			"List visible jobs",
 			role),
 		func(ctx context.Context,
-			i *Page) (*JobListOutput,
+			index *Page) (*JobListOutput,
 			error,
 		) {
 			var rows []dbgen.Job
 			var err error
 			if role == auth.Admin {
-				rows, err = s.Auth.DB.Q.ListJobs(ctx, dbgen.ListJobsParams{Limit: i.Limit, Offset: i.Offset})
+				rows, err = server.Auth.DB.Queries.ListJobs(
+					ctx,
+					dbgen.ListJobsParams{Limit: index.Limit, Offset: index.Offset},
+				)
 			} else {
-				p := auth.Current(ctx)
+				principal := auth.Current(ctx)
 				rows,
-					err = s.Auth.DB.Q.ListOwnJobs(ctx,
+					err = server.Auth.DB.Queries.ListOwnJobs(ctx,
 					dbgen.ListOwnJobsParams{
-						CreatedByUserID: &p.ID,
-						Limit:           i.Limit,
-						Offset:          i.Offset,
+						CreatedByUserID: &principal.ID,
+						Limit:           index.Limit,
+						Offset:          index.Offset,
 					})
 			}
 			if err != nil {
-				return nil, s.Auth.Failure(ctx, "list jobs", err)
+				return nil, server.Auth.Failure(ctx, "list jobs", err)
 			}
 			out := &JobListOutput{}
 			out.Body.Items = []jobs.Snapshot{}
-			for _, j := range rows {
-				out.Body.Items = append(out.Body.Items, jobs.Public(j))
+			for _, job := range rows {
+				out.Body.Items = append(out.Body.Items, jobs.Public(job))
 			}
 			return out, nil
 		})
-	huma.Register(s.API,
-		s.op("GET",
+	huma.Register(server.API,
+		server.op("GET",
 			base+"/{id}",
 			string(role)+"-get-job",
 			"Get job progress",
 			role),
 		func(ctx context.Context,
-			i *IDInput) (*JobOutput,
+			index *IDInput) (*JobOutput,
 			error,
 		) {
-			j, err := s.visibleJob(ctx, i.ID)
+			job, err := server.visibleJob(ctx, index.ID)
 			if err != nil {
 				return nil, err
 			}
-			return &JobOutput{jobs.Public(j)}, nil
+			return &JobOutput{jobs.Public(job)}, nil
 		})
-	huma.Register(s.API,
-		s.op("GET",
+	huma.Register(server.API,
+		server.op("GET",
 			base+"/{id}/errors",
 			string(role)+"-job-errors",
 			"List job issues",
 			role),
 		func(ctx context.Context,
-			i *JobErrorsInput) (*JobErrorsOutput,
+			job *JobErrorsInput) (*JobErrorsOutput,
 			error,
 		) {
-			j, err := s.visibleJob(ctx, i.ID)
+			jobValue, err := server.visibleJob(ctx, job.ID)
 			if err != nil {
 				return nil, err
 			}
-			if j.ArtifactsExpired {
+			if jobValue.ArtifactsExpired {
 				return nil, huma.NewError(410, "report expired")
 			}
 			rows,
-				err := s.Auth.DB.Q.ListJobErrors(ctx,
+				err := server.Auth.DB.Queries.ListJobErrors(ctx,
 				dbgen.ListJobErrorsParams{
-					JobID:  j.ID,
-					Limit:  i.Limit,
-					Offset: i.Offset,
+					JobID:  jobValue.ID,
+					Limit:  job.Limit,
+					Offset: job.Offset,
 				})
 			if err != nil {
-				return nil, s.Auth.Failure(ctx, "list issues", err)
+				return nil, server.Auth.Failure(ctx, "list issues", err)
 			}
 			out := &JobErrorsOutput{}
 			out.Body.Items = []JobIssue{}
@@ -230,10 +233,10 @@ func (s *Server) registerJobRoutes(base string, role auth.Role) {
 			}
 			return out, nil
 		})
-	s.Router.Get(base+"/{id}/download", s.download)
-	s.Router.Get(base+"/{id}/report", s.report)
+	server.Router.Get(base+"/{id}/download", server.download)
+	server.Router.Get(base+"/{id}/report", server.report)
 	for _, name := range []string{"download", "report"} {
-		s.API.OpenAPI().AddOperation(&huma.Operation{
+		server.API.OpenAPI().AddOperation(&huma.Operation{
 			Method:      "GET",
 			Path:        base + "/{id}/" + name,
 			OperationID: string(role) + "-job-" + name,
@@ -272,161 +275,171 @@ func (s *Server) registerJobRoutes(base string, role auth.Role) {
 	}
 }
 
-func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
-	r, ok := s.rawAdmin(w, r)
+func (server *Server) upload(response http.ResponseWriter, request *http.Request) {
+	request, ok := server.rawAdmin(response, request)
 	if !ok {
 		return
 	}
-	format := dbgen.FileFormat(chi.URLParam(r, "format"))
+	format := dbgen.FileFormat(chi.URLParam(request, "format"))
 	if !format.Valid() {
-		s.rawError(w, r, huma.Error422UnprocessableEntity("unsupported file format"))
+		server.rawError(response, request, huma.Error422UnprocessableEntity("unsupported file format"))
 		return
 	}
-	if len(r.URL.Query()) != 0 {
-		s.rawError(w, r, huma.Error422UnprocessableEntity("unknown query parameters"))
+	if len(request.URL.Query()) != 0 {
+		server.rawError(response, request, huma.Error422UnprocessableEntity("unknown query parameters"))
 		return
 	}
-	if strings.Split(r.Header.Get("Content-Type"), ";")[0] != "application/octet-stream" {
-		s.rawError(w, r, huma.NewError(415, "use application/octet-stream"))
+	if strings.Split(request.Header.Get("Content-Type"), ";")[0] != "application/octet-stream" {
+		server.rawError(response, request, huma.NewError(415, "use application/octet-stream"))
 		return
 	}
-	if r.ContentLength > s.Config.Jobs.MaxUploadBytes {
-		s.rawError(w, r, huma.NewError(413, "file exceeds upload limit"))
+	if request.ContentLength > server.Config.Jobs.MaxUploadBytes {
+		server.rawError(response, request, huma.NewError(413, "file exceeds upload limit"))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
+	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Minute)
 	defer cancel()
-	r = r.WithContext(ctx)
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(15 * time.Minute))
-	defer http.NewResponseController(w).SetReadDeadline(time.Time{})
-	snapshot, err := usertasks.CreateImport(ctx, s.Jobs, jobs.ForPrincipal(auth.Current(ctx)), format, r.Body)
+	request = request.WithContext(ctx)
+	_ = http.NewResponseController(response).SetReadDeadline(time.Now().Add(15 * time.Minute))
+	defer http.NewResponseController(response).SetReadDeadline(time.Time{})
+	snapshot, err := usertasks.CreateImport(
+		ctx,
+		server.Jobs,
+		jobs.ForPrincipal(auth.Current(ctx)),
+		format,
+		request.Body,
+	)
 	if errors.Is(err, usertasks.ErrUploadTooLarge) {
-		s.rawError(w, r, huma.NewError(413, err.Error()))
+		server.rawError(response, request, huma.NewError(413, err.Error()))
 		return
 	}
 	if errors.Is(err, usertasks.ErrEmptyFile) {
-		s.rawError(w, r, huma.Error400BadRequest(err.Error()))
+		server.rawError(response, request, huma.Error400BadRequest(err.Error()))
 		return
 	}
 	if err != nil {
-		s.rawError(w, r, s.Auth.Failure(ctx, "upload import", err))
+		server.rawError(response, request, server.Auth.Failure(ctx, "upload import", err))
 		return
 	}
-	writeJSON(w, 202, snapshot)
+	writeJSON(response, 202, snapshot)
 }
 
-func (s *Server) rawJobPrincipal(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
+func (server *Server) rawJobPrincipal(response http.ResponseWriter, request *http.Request) (*http.Request, bool) {
 	role := auth.User
-	if strings.HasPrefix(r.URL.Path, "/api/v1/admin/") {
+	if strings.HasPrefix(request.URL.Path, "/api/v1/admin/") {
 		role = auth.Admin
 	}
-	header := r.Header.Get("Authorization")
+	header := request.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") {
-		s.rawError(w, r, huma.Error401Unauthorized("bearer token required"))
-		return r, false
+		server.rawError(response, request, huma.Error401Unauthorized("bearer token required"))
+		return request, false
 	}
-	p, err := s.Auth.Authenticate(r.Context(), strings.TrimPrefix(header, "Bearer "), role)
+	principal, err := server.Auth.Authenticate(request.Context(), strings.TrimPrefix(header, "Bearer "), role)
 	if err != nil {
-		s.rawError(w, r, err)
-		return r, false
+		server.rawError(response, request, err)
+		return request, false
 	}
-	return r.WithContext(auth.WithPrincipal(r.Context(), p)), true
+	return request.WithContext(auth.WithPrincipal(request.Context(), principal)), true
 }
 
-func (s *Server) artifactJob(w http.ResponseWriter, r *http.Request) (*http.Request, dbgen.Job, bool) {
-	r, ok := s.rawJobPrincipal(w, r)
+func (server *Server) artifactJob(
+	response http.ResponseWriter,
+	request *http.Request,
+) (*http.Request, dbgen.Job, bool) {
+	request, ok := server.rawJobPrincipal(response, request)
 	if !ok {
-		return r, dbgen.Job{}, false
+		return request, dbgen.Job{}, false
 	}
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	id, err := uuid.Parse(chi.URLParam(request, "id"))
 	if err != nil {
-		s.rawError(w, r, huma.Error422UnprocessableEntity("invalid job id"))
-		return r, dbgen.Job{}, false
+		server.rawError(response, request, huma.Error422UnprocessableEntity("invalid job id"))
+		return request, dbgen.Job{}, false
 	}
-	j, err := s.visibleJob(r.Context(), id)
+	job, err := server.visibleJob(request.Context(), id)
 	if err != nil {
-		s.rawError(w, r, err)
-		return r, j, false
+		server.rawError(response, request, err)
+		return request, job, false
 	}
-	if j.ArtifactsExpired {
-		s.rawError(w, r, huma.NewError(410, "artifact expired"))
-		return r, j, false
+	if job.ArtifactsExpired {
+		server.rawError(response, request, huma.NewError(410, "artifact expired"))
+		return request, job, false
 	}
-	return r, j, true
+	return request, job, true
 }
 
-func (s *Server) download(w http.ResponseWriter, r *http.Request) {
-	r, j, ok := s.artifactJob(w, r)
+func (server *Server) download(response http.ResponseWriter, request *http.Request) {
+	request, job, ok := server.artifactJob(response, request)
 	if !ok {
 		return
 	}
-	data, err := jobs.Decode(j)
+	data, err := jobs.Decode(job)
 	if err != nil {
-		s.rawError(w, r, s.Auth.Failure(r.Context(), "decode job files", err))
+		server.rawError(response, request, server.Auth.Failure(request.Context(), "decode job files", err))
 		return
 	}
 	artifact, found := data.FindFile(dbgen.JobFileRoleResult)
-	if !jobs.Terminal(j.Status) || !found {
-		s.rawError(w, r, huma.Error409Conflict("result is not available"))
+	if !jobs.Terminal(job.Status) || !found {
+		server.rawError(response, request, huma.Error409Conflict("result is not available"))
 		return
 	}
-	path, err := s.Jobs.Path(artifact.Key)
+	path, err := server.Jobs.Path(artifact.Key)
 	if err != nil {
-		s.rawError(w, r, s.Auth.Failure(r.Context(), "artifact path", err))
+		server.rawError(response, request, server.Auth.Failure(request.Context(), "artifact path", err))
 		return
 	}
-	f, err := os.Open(path)
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		s.rawError(w, r, huma.NewError(410, "artifact unavailable"))
+		server.rawError(response, request, huma.NewError(410, "artifact unavailable"))
 		return
 	}
 	if err != nil {
-		s.rawError(w, r, s.Auth.Failure(r.Context(), "open artifact", err))
+		server.rawError(response, request, server.Auth.Failure(request.Context(), "open artifact", err))
 		return
 	}
-	defer f.Close()
-	info, err := f.Stat()
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
-		s.rawError(w, r, s.Auth.Failure(r.Context(), "stat artifact", err))
+		server.rawError(response, request, server.Auth.Failure(request.Context(), "stat artifact", err))
 		return
 	}
 	name := artifact.Name
 	if name == "" {
 		name = "result." + string(artifact.Format)
 	}
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
-	w.Header().Set("Content-Type", mime.TypeByExtension("."+string(artifact.Format)))
-	p := auth.Current(r.Context())
-	s.Auth.Audit(r.Context(),
-		p.Role,
-		p.ID.String(),
+	response.Header().
+		Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+	response.Header().Set("Content-Type", mime.TypeByExtension("."+string(artifact.Format)))
+	principal := auth.Current(request.Context())
+	server.Auth.Audit(request.Context(),
+		principal.Role,
+		principal.ID.String(),
 		dbgen.AuditActionJobsresultDownloaded,
-		j.ID.String(),
+		job.ID.String(),
 		dbgen.AuditResultSuccess)
-	http.ServeContent(w, r, name, info.ModTime(), f)
+	http.ServeContent(response, request, name, info.ModTime(), file)
 }
 
-func (s *Server) report(w http.ResponseWriter, r *http.Request) {
-	r, j, ok := s.artifactJob(w, r)
+func (server *Server) report(response http.ResponseWriter, request *http.Request) {
+	request, job, ok := server.artifactJob(response, request)
 	if !ok {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Minute)
 	defer cancel()
 	rows,
-		err := s.Auth.DB.Pool.Query(ctx,
+		err := server.Auth.DB.Pool.Query(ctx,
 		`
 		SELECT item_key, code, error FROM job_issues WHERE job_id=$1 ORDER BY id
 	`,
-		j.ID)
+		job.ID)
 	if err != nil {
-		s.rawError(w, r, s.Auth.Failure(ctx, "open issue report", err))
+		server.rawError(response, request, server.Auth.Failure(ctx, "open issue report", err))
 		return
 	}
 	defer rows.Close()
-	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="job-issues.csv"`)
-	writer := csv.NewWriter(w)
+	response.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	response.Header().Set("Content-Disposition", `attachment; filename="job-issues.csv"`)
+	writer := csv.NewWriter(response)
 	err = writer.Write([]string{"item_key", "code", "error"})
 	for err == nil && rows.Next() {
 		var item, code string
@@ -444,6 +457,6 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 		err = writer.Error()
 	}
 	if err != nil {
-		s.Log.ErrorContext(ctx, "stream report", "job_id", j.ID, "error", err)
+		server.Log.ErrorContext(ctx, "stream report", "job_id", job.ID, "error", err)
 	}
 }

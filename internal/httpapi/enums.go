@@ -9,10 +9,10 @@ import (
 )
 
 // enumSchema использует сгенерированный список SQL enum без повторного описания в HTTP-тегах.
-func enumSchema[T ~string](values []T) *huma.Schema {
+func enumSchema[Enum ~string](values []Enum) *huma.Schema {
 	options := make([]any, len(values))
-	for i, v := range values {
-		options[i] = string(v)
+	for index, value := range values {
+		options[index] = string(value)
 	}
 	return &huma.Schema{Type: "string", Enum: options}
 }
