@@ -1,6 +1,26 @@
 name: go-boilerplate
 
 services:
+  garage:
+    image: dxflrs/garage:v2.5.0
+    pull_policy: missing
+    command: [/garage, server, --single-node, --default-bucket]
+    environment:
+      GARAGE_DEFAULT_ACCESS_KEY: GK0123456789abcdef0123456789abcdef
+      GARAGE_DEFAULT_SECRET_KEY: local-development-s3-secret-change-me
+      GARAGE_DEFAULT_BUCKET: boilerplate
+    ports:
+      - "127.0.0.1:23900:3900"
+    volumes:
+      - ./config/garage.toml:/etc/garage.toml:ro
+      - garage_data:/var/lib/garage
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
   postgres:
     image: postgres:17.11-trixie
     pull_policy: missing
@@ -83,6 +103,7 @@ services:
       retries: 10
 
 volumes:
+  garage_data:
   postgres_data:
   redis_data:
   kafka_data:

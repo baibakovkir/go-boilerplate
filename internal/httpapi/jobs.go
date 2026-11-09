@@ -125,7 +125,7 @@ func (server *Server) registerJobs() {
 }
 
 func (server *Server) visibleJob(ctx context.Context, id uuid.UUID) (dbgen.Job, error) {
-	job, err := server.Auth.DB.Queries.GetJob(ctx, id)
+	job, err := server.Queries.GetJob(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return job, huma.Error404NotFound("job not found")
 	}
@@ -152,14 +152,14 @@ func (server *Server) registerJobRoutes(base string, role auth.Role) {
 			var rows []dbgen.Job
 			var err error
 			if role == auth.Admin {
-				rows, err = server.Auth.DB.Queries.ListJobs(
+				rows, err = server.Queries.ListJobs(
 					ctx,
 					dbgen.ListJobsParams{Limit: index.Limit, Offset: index.Offset},
 				)
 			} else {
 				principal := auth.Current(ctx)
 				rows,
-					err = server.Auth.DB.Queries.ListOwnJobs(ctx,
+					err = server.Queries.ListOwnJobs(ctx,
 					dbgen.ListOwnJobsParams{
 						CreatedByUserID: &principal.ID,
 						Limit:           index.Limit,
@@ -210,7 +210,7 @@ func (server *Server) registerJobRoutes(base string, role auth.Role) {
 				return nil, huma.NewError(410, "report expired")
 			}
 			rows,
-				err := server.Auth.DB.Queries.ListJobErrors(ctx,
+				err := server.Queries.ListJobErrors(ctx,
 				dbgen.ListJobErrorsParams{
 					JobID:  jobValue.ID,
 					Limit:  job.Limit,
@@ -234,6 +234,7 @@ func (server *Server) registerJobRoutes(base string, role auth.Role) {
 			return out, nil
 		})
 	server.Router.Get(base+"/{id}/download", server.download)
+	server.Router.Head(base+"/{id}/download", server.download)
 	server.Router.Get(base+"/{id}/report", server.report)
 	for _, name := range []string{"download", "report"} {
 		server.API.OpenAPI().AddOperation(&huma.Operation{
@@ -305,6 +306,8 @@ func (server *Server) upload(response http.ResponseWriter, request *http.Request
 	snapshot, err := usertasks.CreateImport(
 		ctx,
 		server.Jobs,
+		server.Config,
+		server.Artifacts,
 		jobs.ForPrincipal(auth.Current(ctx)),
 		format,
 		request.Body,
@@ -382,12 +385,7 @@ func (server *Server) download(response http.ResponseWriter, request *http.Reque
 		server.rawError(response, request, huma.Error409Conflict("result is not available"))
 		return
 	}
-	path, err := server.Jobs.Path(artifact.Key)
-	if err != nil {
-		server.rawError(response, request, server.Auth.Failure(request.Context(), "artifact path", err))
-		return
-	}
-	file, err := os.Open(path)
+	file, err := server.Artifacts.Open(request.Context(), artifact.Key)
 	if errors.Is(err, os.ErrNotExist) {
 		server.rawError(response, request, huma.NewError(410, "artifact unavailable"))
 		return
@@ -397,11 +395,8 @@ func (server *Server) download(response http.ResponseWriter, request *http.Reque
 		return
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		server.rawError(response, request, server.Auth.Failure(request.Context(), "stat artifact", err))
-		return
-	}
+	info := file.Info()
+	response.Header().Set("ETag", info.ETag)
 	name := artifact.Name
 	if name == "" {
 		name = "result." + string(artifact.Format)
@@ -416,7 +411,7 @@ func (server *Server) download(response http.ResponseWriter, request *http.Reque
 		dbgen.AuditActionJobsresultDownloaded,
 		job.ID.String(),
 		dbgen.AuditResultSuccess)
-	http.ServeContent(response, request, name, info.ModTime(), file)
+	http.ServeContent(response, request, name, info.Modified, file)
 }
 
 func (server *Server) report(response http.ResponseWriter, request *http.Request) {
@@ -426,12 +421,7 @@ func (server *Server) report(response http.ResponseWriter, request *http.Request
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Minute)
 	defer cancel()
-	rows,
-		err := server.Auth.DB.Pool.Query(ctx,
-		`
-		SELECT item_key, code, error FROM job_issues WHERE job_id=$1 ORDER BY id
-	`,
-		job.ID)
+	rows, err := server.Queries.Issues(ctx, job.ID)
 	if err != nil {
 		server.rawError(response, request, server.Auth.Failure(ctx, "open issue report", err))
 		return

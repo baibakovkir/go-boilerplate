@@ -42,7 +42,7 @@ test:
 	go test ./...
 
 integration:
-	RUN_INTEGRATION=1 go test ./internal/httpapi -run TestIntegration -count=1 -timeout=10m -v
+	RUN_INTEGRATION=1 go test ./internal/httpapi ./internal/artifacts -run Integration -count=1 -timeout=10m -v
 
 check: lint
 	go test -race ./...
@@ -52,4 +52,4 @@ loadtest:
 
 # Полная цепочка с реальным хешированием миллиона паролей: может занять часы.
 loadtest-full:
-	RUN_INTEGRATION=1 RUN_FULL_LOAD=1 go test ./internal/httpapi -run TestIntegration -count=1 -timeout=12h -v
+	RUN_INTEGRATION=1 RUN_FULL_LOAD=1 go test ./internal/httpapi ./internal/artifacts -run Integration -count=1 -timeout=12h -v

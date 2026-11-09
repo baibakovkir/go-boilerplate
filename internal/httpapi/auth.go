@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
-
 	"go-boilerplate/internal/auth"
 )
 
@@ -89,8 +87,8 @@ func (server *Server) tokens(role auth.Role, tokens auth.Tokens) *TokenOutput {
 }
 
 func (server *Server) registerAuth() {
-	huma.Register(
-		server.API,
+	register(
+		server,
 		server.op("POST", "/api/v1/auth/login", "user-login", "Sign in", ""),
 		func(ctx context.Context, input *LoginInput) (*TokenOutput, error) {
 			tokens, err := server.Auth.Login(ctx, input.Body)
@@ -100,8 +98,8 @@ func (server *Server) registerAuth() {
 			return server.tokens(auth.User, tokens), nil
 		},
 	)
-	huma.Register(
-		server.API,
+	register(
+		server,
 		server.op("POST", "/api/v1/admin/auth/login", "admin-login", "Administrator password step", ""),
 		func(ctx context.Context, input *LoginInput) (*ChallengeOutput, error) {
 			id, err := server.Auth.AdminLogin(ctx, input.Body)
@@ -114,8 +112,8 @@ func (server *Server) registerAuth() {
 			return output, nil
 		},
 	)
-	huma.Register(
-		server.API,
+	register(
+		server,
 		server.op("POST", "/api/v1/admin/auth/otp", "admin-otp", "Complete administrator sign-in", ""),
 		func(ctx context.Context, input *OTPInput) (*TokenOutput, error) {
 			tokens, err := server.Auth.VerifyOTP(ctx, input.Body.ChallengeID, input.Body.Code)
@@ -131,8 +129,8 @@ func (server *Server) registerAuth() {
 			base = "/api/v1/admin/auth"
 		}
 		tag := string(role)
-		huma.Register(
-			server.API,
+		register(
+			server,
 			server.op("GET", base+"/csrf", tag+"-csrf", "Get session-bound CSRF token", ""),
 			func(ctx context.Context, input *RefreshInput) (*struct {
 				Body struct {
@@ -153,8 +151,8 @@ func (server *Server) registerAuth() {
 				return output, nil
 			},
 		)
-		huma.Register(
-			server.API,
+		register(
+			server,
 			server.op("POST", base+"/refresh", tag+"-refresh", "Rotate refresh token", ""),
 			func(ctx context.Context, input *RefreshInput) (*TokenOutput, error) {
 				tokens, err := server.Auth.Refresh(ctx, role, input.cookie(role), input.CSRF)
@@ -164,8 +162,8 @@ func (server *Server) registerAuth() {
 				return server.tokens(role, tokens), nil
 			},
 		)
-		huma.Register(
-			server.API,
+		register(
+			server,
 			server.op("POST", base+"/logout", tag+"-logout", "Revoke current session", ""),
 			func(ctx context.Context, input *RefreshInput) (*struct {
 				SetCookie string `header:"Set-Cookie"`
@@ -187,8 +185,8 @@ func (server *Server) registerAuth() {
 				return output, nil
 			},
 		)
-		huma.Register(
-			server.API,
+		register(
+			server,
 			server.op("POST", base+"/password/forgot", tag+"-forgot-password", "Request password reset", ""),
 			func(ctx context.Context, input *struct{ Body auth.EmailInput }) (*MessageOutput, error) {
 				if err := server.Auth.ForgotPassword(ctx, role, input.Body.Email); err != nil {
@@ -197,8 +195,8 @@ func (server *Server) registerAuth() {
 				return message("if the account exists, a reset email will be sent"), nil
 			},
 		)
-		huma.Register(
-			server.API,
+		register(
+			server,
 			server.op(
 				"POST",
 				base+"/password/reset",
@@ -223,15 +221,15 @@ func (server *Server) registerAuth() {
 		if role == auth.Admin {
 			me = "/api/v1/admin/me"
 		}
-		huma.Register(
-			server.API,
+		register(
+			server,
 			server.op("GET", me, tag+"-me", "Get current account", role),
 			func(ctx context.Context, input *struct{}) (*struct{ Body auth.PublicAccount }, error) {
 				return &struct{ Body auth.PublicAccount }{Body: auth.Current(ctx).Account}, nil
 			},
 		)
-		huma.Register(
-			server.API,
+		register(
+			server,
 			server.op("POST", me+"/password", tag+"-change-password", "Change password and revoke all sessions", role),
 			func(ctx context.Context, input *struct {
 				Body struct {

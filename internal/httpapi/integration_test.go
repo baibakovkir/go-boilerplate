@@ -29,15 +29,23 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/xuri/excelize/v2"
 
+	"go-boilerplate/internal/accounts"
+	"go-boilerplate/internal/apperror"
+	"go-boilerplate/internal/artifacts"
 	"go-boilerplate/internal/auth"
 	appconfig "go-boilerplate/internal/config"
 	"go-boilerplate/internal/database"
 	"go-boilerplate/internal/database/dbgen"
 	"go-boilerplate/internal/jobs"
 	appmail "go-boilerplate/internal/mail"
+	"go-boilerplate/internal/readmodel"
+	"go-boilerplate/internal/realtime"
 	"go-boilerplate/internal/security"
+	"go-boilerplate/internal/telemetry"
 	"go-boilerplate/internal/usertasks"
 	"go-boilerplate/internal/worker"
+
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 type captureMail struct {
@@ -108,6 +116,7 @@ func TestIntegration(t *testing.T) {
 	}
 	config.Postgres.Database = dbName
 	config.Redis.Prefix = "test:" + suffix + ":"
+	config.S3.Prefix = "test-" + suffix
 	config.Kafka.Topic = "test.jobs." + suffix
 	config.Kafka.Group = "test.workers." + suffix
 	config.HTTPServer.Timeout = 15 * time.Second
@@ -154,14 +163,63 @@ func TestIntegration(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(logs, nil))
 	sender := &captureMail{real: appmail.New(config.SMTP)}
 	serviceValue := auth.New(db, redisClient, config, sender, logger)
-	service, err := jobs.New(db, redisClient, config)
+	metrics := telemetry.New()
+	s3Store, err := artifacts.New(ctx, config.S3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = usertasks.Register(service); err != nil {
+
+	store := metrics.Storage(s3Store)
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 20*time.Second)
+		defer stop()
+		cursor := ""
+		for {
+			objects, next, err := store.List(cleanup, cursor)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			for _, object := range objects {
+				if err := store.Delete(cleanup, object.Key); err != nil {
+					t.Error(err)
+				}
+			}
+			if next == "" {
+				break
+			}
+			cursor = next
+		}
+	})
+
+	service, err := jobs.New(db, redisClient, config, store, metrics)
+	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := New(serviceValue, service, config, logger)
+	if err = usertasks.Register(service, db, config, store); err != nil {
+		t.Fatal(err)
+	}
+	kafkaClient, err := kgo.NewClient(kgo.SeedBrokers(config.Kafka.Brokers...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(kafkaClient.Close)
+	server, err := New(Dependencies{
+		Artifacts: store, Auth: serviceValue, Accounts: accounts.New(db), Jobs: service, Queries: readmodel.New(db),
+		Realtime: realtime.New(redisClient, config.Redis.Prefix), Redis: redisClient, Kafka: kafkaClient,
+		Config: config, Log: logger, Ready: func(ctx context.Context) error {
+			if err := db.Pool.Ping(ctx); err != nil {
+				return apperror.Failure("readiness postgres", err)
+			}
+			if err := redisClient.Ping(ctx).Err(); err != nil {
+				return apperror.Failure("readiness redis", err)
+			}
+			if err := store.Check(ctx); err != nil {
+				return apperror.Failure("readiness artifacts", err)
+			}
+			return nil
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,8 +492,11 @@ func TestIntegration(t *testing.T) {
 		offlineConfig := *config
 		offlineConfig.Kafka.Brokers = []string{"127.0.0.1:1"}
 		offlineJobs := *service
-		offlineJobs.Config = &offlineConfig
-		offlineWorker, err := worker.New(&offlineJobs, logger)
+		offlineClient, err := kgo.NewClient(kgo.SeedBrokers(offlineConfig.Kafka.Brokers...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		offlineWorker, err := worker.New(&offlineJobs, offlineClient, &offlineConfig, logger, metrics)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -532,7 +593,27 @@ func TestIntegration(t *testing.T) {
 	if resp != nil && resp.StatusCode != 401 {
 		t.Fatal(resp.StatusCode)
 	}
-	worker, err := worker.New(service, logger)
+	consumerClient, err := kgo.NewClient(
+		kgo.SeedBrokers(config.Kafka.Brokers...),
+		kgo.ConsumerGroup(config.Kafka.Group),
+		kgo.ConsumeTopics(config.Kafka.Topic),
+		kgo.DisableAutoCommit(),
+		kgo.AllowAutoTopicCreation(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(consumerClient.Close)
+	workerConfig := *config
+	workerConfig.Jobs.Directory = t.TempDir()
+	workerJobs, err := jobs.New(db, redisClient, &workerConfig, store, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = usertasks.Register(workerJobs, db, &workerConfig, store); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := worker.New(workerJobs, consumerClient, &workerConfig, logger, metrics)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -764,6 +845,33 @@ func TestIntegration(t *testing.T) {
 				admin.AccessToken,
 				nil,
 			)
+			path := "/api/v1/admin/jobs/" + job.ID.String() + "/download"
+			status, partial, headers := request(
+				t,
+				"GET",
+				path,
+				nil,
+				admin.AccessToken,
+				map[string]string{"Range": "bytes=0-3"},
+			)
+			if status != 206 || !bytes.Equal(partial, file[:4]) || headers.Get("Content-Range") == "" {
+				t.Fatalf("range: %d %q", status, partial)
+			}
+			status, head, headers := request(t, "HEAD", path, nil, admin.AccessToken, nil)
+			if status != 200 || len(head) != 0 || headers.Get("Content-Length") == "" {
+				t.Fatalf("HEAD: %d %q", status, head)
+			}
+			status, _, _ = request(
+				t,
+				"GET",
+				path,
+				nil,
+				admin.AccessToken,
+				map[string]string{"If-None-Match": headers.Get("ETag")},
+			)
+			if status != 304 {
+				t.Fatalf("conditional GET: %d", status)
+			}
 			if format == "csv" {
 				if !bytes.Contains(file, []byte("gamma@example.test")) || bytes.Contains(file, []byte("password")) {
 					t.Fatal("unsafe CSV export")
@@ -863,6 +971,7 @@ func TestIntegration(t *testing.T) {
 			load, err := usertasks.CreateImport(
 				ctx,
 				service,
+				config, store,
 				jobs.Actor{AdminID: &actor.ID},
 				dbgen.FileFormatCsv,
 				fixture,
@@ -902,7 +1011,9 @@ func TestIntegration(t *testing.T) {
 	t.Run("generic-kernel-actors-and-ownership", func(t *testing.T) {
 		stopWorker()
 		<-workerDone
-		kernel, errValue := jobs.New(db, redisClient, config)
+		verifyArchitecture(t, db, redisClient, config, store, service)
+		t.Run("two-worker-processes", func(t *testing.T) { verifyWorkerProcesses(t, db, config, service, kafkaClient) })
+		kernel, errValue := jobs.New(db, redisClient, config, store, metrics)
 		if errValue != nil {
 			t.Fatal(errValue)
 		}
@@ -922,7 +1033,7 @@ func TestIntegration(t *testing.T) {
 					return fmt.Errorf("unexpected generic payload")
 				}
 				if _,
-					err = kernel.DB.Pool.Exec(ctx,
+					err = db.Pool.Exec(ctx,
 					`
 		UPDATE jobs SET total=2, processed=2, succeeded=2 WHERE id=$1
 	`,

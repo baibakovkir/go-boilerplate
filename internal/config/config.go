@@ -22,6 +22,8 @@ type Config struct {
 	Kafka      KafkaConfig      `yaml:"kafka"`
 	Auth       AuthConfig       `yaml:"auth"`
 	SMTP       SMTPConfig       `yaml:"smtp"`
+	S3         S3Config         `yaml:"s3"`
+	Metrics    MetricsConfig    `yaml:"metrics"`
 	Jobs       JobsConfig       `yaml:"jobs"`
 	Audit      AuditConfig      `yaml:"audit"`
 	Admins     []AdminConfig    `yaml:"admins"`
@@ -103,6 +105,23 @@ type SMTPConfig struct {
 	TLS      string `yaml:"tls" env-default:"none"`
 }
 
+// S3Config задаёт приватное объектное хранилище; пустой endpoint означает AWS S3.
+type S3Config struct {
+	Endpoint  string `yaml:"endpoint" env:"S3_ENDPOINT"`
+	Region    string `yaml:"region" env:"S3_REGION" env-default:"garage"`
+	Bucket    string `yaml:"bucket" env:"S3_BUCKET" env-default:"boilerplate"`
+	Prefix    string `yaml:"prefix" env:"S3_PREFIX" env-default:"jobs"`
+	AccessKey string `yaml:"access_key" env:"S3_ACCESS_KEY"`
+	SecretKey string `yaml:"secret_key" env:"S3_SECRET_KEY"`
+	PathStyle bool   `yaml:"path_style" env:"S3_PATH_STYLE" env-default:"true"`
+}
+
+// MetricsConfig задаёт отдельные служебные listeners; пустой адрес отключает listener.
+type MetricsConfig struct {
+	APIAddress    string `yaml:"api_address" env:"METRICS_API_ADDRESS" env-default:"127.0.0.1:9181"`
+	WorkerAddress string `yaml:"worker_address" env:"METRICS_WORKER_ADDRESS" env-default:"127.0.0.1:9182"`
+}
+
 // JobsConfig ограничивает размер файлов, обработку пакетов и срок хранения результатов.
 type JobsConfig struct {
 	// Concurrency ограничивает число одновременно исполняемых задач одним worker.
@@ -140,6 +159,13 @@ func Load() (*Config, error) {
 	if err := cleanenv.ReadConfig(parts, &config); err != nil {
 		return nil, fmt.Errorf("read config %q: %w", parts, err)
 	}
+	// Старый локальный конфиг получает настройки нового сервиса без перезаписи файла.
+	if config.Env == "local" && config.S3.Region == "garage" && config.S3.Endpoint == "" && config.S3.AccessKey == "" &&
+		config.S3.SecretKey == "" {
+		config.S3.Endpoint = "http://localhost:23900"
+		config.S3.AccessKey = "GK0123456789abcdef0123456789abcdef"
+		config.S3.SecretKey = "local-development-s3-secret-change-me"
+	}
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -150,6 +176,26 @@ func Load() (*Config, error) {
 func (config *Config) Validate() error {
 	if config.Jobs.Concurrency < 1 || config.Jobs.Concurrency > 32 {
 		return fmt.Errorf("jobs.concurrency must be between 1 and 32")
+	}
+	if config.S3.Bucket == "" || config.S3.Region == "" {
+		return fmt.Errorf("s3.bucket and s3.region are required")
+	}
+	if (config.S3.AccessKey == "") != (config.S3.SecretKey == "") {
+		return fmt.Errorf("S3 credentials must be provided as a pair")
+	}
+	if strings.Contains(config.S3.Prefix, "..") || strings.Contains(config.S3.Prefix, "\\") {
+		return fmt.Errorf("invalid s3.prefix")
+	}
+	if config.S3.Endpoint != "" {
+		endpoint, err := url.Parse(config.S3.Endpoint)
+		if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") ||
+			endpoint.User != nil ||
+			endpoint.RawQuery != "" {
+			return fmt.Errorf("invalid s3.endpoint")
+		}
+	}
+	if config.Env != "local" && strings.HasPrefix(config.S3.SecretKey, "local-development-") {
+		return fmt.Errorf("replace the example S3 secret outside local")
 	}
 	if _, err := cron.ParseStandard(config.Audit.Schedule); err != nil {
 		return fmt.Errorf("invalid audit.schedule: %w", err)

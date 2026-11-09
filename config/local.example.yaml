@@ -54,6 +54,19 @@ smtp:
   from: noreply@boilerplate.local
   tls: none # none (только local), starttls или tls
 
+s3:
+  endpoint: http://localhost:23900
+  region: garage
+  bucket: boilerplate
+  prefix: jobs
+  access_key: GK0123456789abcdef0123456789abcdef
+  secret_key: local-development-s3-secret-change-me
+  path_style: true
+
+metrics:
+  api_address: 127.0.0.1:9181
+  worker_address: 127.0.0.1:9182
+
 jobs:
   concurrency: 1
   directory: var/jobs

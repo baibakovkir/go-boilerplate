@@ -43,7 +43,7 @@ func TestSharedCredentialSchema(t *testing.T) {
 		},
 	}
 	for _, tt := range cases {
-		if got := ValidateCredentials(Credentials{tt.email, tt.password}); got != tt.valid {
+		if got := ValidateCredentials(Credentials{Email: tt.email, Password: tt.password}); got != tt.valid {
 			t.Errorf("email %q length %d: got %v", tt.email, len(tt.password), got)
 		}
 	}

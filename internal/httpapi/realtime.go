@@ -2,8 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -12,17 +10,10 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 
 	"go-boilerplate/internal/auth"
 	"go-boilerplate/internal/jobs"
-	"go-boilerplate/internal/security"
 )
-
-type wsTicket struct {
-	Principal auth.Principal
-	JobID     uuid.UUID
-}
 
 // TicketOutput возвращает одноразовый билет и путь подключения WebSocket.
 type TicketOutput struct {
@@ -39,8 +30,8 @@ func (server *Server) registerRealtime() {
 		if role == auth.Admin {
 			base += "/admin"
 		}
-		huma.Register(
-			server.API,
+		register(
+			server,
 			server.op(
 				"POST",
 				base+"/ws-tickets",
@@ -61,16 +52,9 @@ func (server *Server) registerRealtime() {
 				if _, err := server.visibleJob(ctx, job.Body.JobID); err != nil {
 					return nil, err
 				}
-				ticket := security.RandomToken()
-				value, err := json.Marshal(wsTicket{*principal, job.Body.JobID})
+				ticket, err := server.Realtime.Issue(ctx, *principal, job.Body.JobID)
 				if err != nil {
 					return nil, err
-				}
-				if err = server.Auth.Redis.Set(ctx,
-					server.Config.Redis.Prefix+"ws-ticket:"+auth.Digest(ticket),
-					value,
-					30*time.Second).Err(); err != nil {
-					return nil, server.Auth.Failure(ctx, "create websocket ticket", err)
 				}
 				output := &TicketOutput{}
 				output.Body.Ticket = ticket
@@ -89,19 +73,9 @@ func (server *Server) websocket(response http.ResponseWriter, request *http.Requ
 		server.rawError(response, request, huma.Error401Unauthorized("single-use ticket required"))
 		return
 	}
-	value, err := server.Auth.Redis.GetDel(request.Context(), server.Config.Redis.Prefix+"ws-ticket:"+auth.Digest(raw)).
-		Bytes()
-	if errors.Is(err, redis.Nil) {
-		server.rawError(response, request, huma.Error401Unauthorized("invalid or expired ticket"))
-		return
-	}
+	ticket, err := server.Realtime.Consume(request.Context(), raw)
 	if err != nil {
-		server.rawError(response, request, server.Auth.Failure(request.Context(), "consume websocket ticket", err))
-		return
-	}
-	var ticket wsTicket
-	if err = json.Unmarshal(value, &ticket); err != nil {
-		server.rawError(response, request, huma.Error401Unauthorized("invalid ticket"))
+		server.rawError(response, request, err)
 		return
 	}
 	role := auth.User
@@ -138,7 +112,7 @@ func (server *Server) websocket(response http.ResponseWriter, request *http.Requ
 	stopShutdown := context.AfterFunc(server.lifetime, cancel)
 	defer stopShutdown()
 	ctx = conn.CloseRead(ctx)
-	sub := server.Auth.Redis.Subscribe(ctx, server.Config.Redis.Prefix+"job:"+ticket.JobID.String())
+	sub := server.Realtime.Subscribe(ctx, ticket.JobID)
 	defer sub.Close()
 	if _, err = sub.Receive(ctx); err != nil {
 		conn.Close(websocket.StatusInternalError, "subscription unavailable")
@@ -149,7 +123,7 @@ func (server *Server) websocket(response http.ResponseWriter, request *http.Requ
 		if err := server.Auth.ValidatePrincipal(ctx, &ticket.Principal); err != nil {
 			return err
 		}
-		job, err := server.Auth.DB.Queries.GetJob(ctx, ticket.JobID)
+		job, err := server.Queries.GetJob(ctx, ticket.JobID)
 		if err != nil {
 			return err
 		}

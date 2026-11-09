@@ -7,15 +7,30 @@ import (
 	"errors"
 	"io"
 	"os"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
+	"go-boilerplate/internal/artifacts"
+	appconfig "go-boilerplate/internal/config"
+	"go-boilerplate/internal/database"
 	"go-boilerplate/internal/database/dbgen"
 	"go-boilerplate/internal/jobs"
 )
 
 // Handlers реализует только операции над пользователями; worker не знает этих деталей.
-type Handlers struct{ *jobs.Service }
+// Runtime ограничивает доступ обработчика прогрессом и завершением задачи.
+type Runtime interface {
+	Publish(context.Context, uuid.UUID) error
+	Finish(context.Context, uuid.UUID, string, dbgen.JobStatus, *jobs.Data, dbgen.JobErrorCode) error
+}
+type Handlers struct {
+	runtime   Runtime
+	db        *database.Store
+	config    *appconfig.Config
+	artifacts artifacts.Store
+}
 
 // ExportOptions — типизированные параметры демонстрационного экспорта.
 type ExportOptions struct {
@@ -25,8 +40,8 @@ type ExportOptions struct {
 }
 
 // Register подключает демонстрацию при сборке API и worker.
-func Register(service *jobs.Service) error {
-	handlers := &Handlers{service}
+func Register(service *jobs.Service, db *database.Store, config *appconfig.Config, store artifacts.Store) error {
+	handlers := &Handlers{runtime: service, db: db, config: config, artifacts: store}
 	if err := service.Register(dbgen.JobTypeUsersimport, handlers.Import); err != nil {
 		return err
 	}
@@ -42,6 +57,8 @@ var ErrEmptyFile = errors.New("file is empty")
 // CreateImport сохраняет файл и создаёт задачу; права проверяет административный endpoint.
 func CreateImport(ctx context.Context,
 	service *jobs.Service,
+	config *appconfig.Config,
+	store artifacts.Store,
 	actor jobs.Actor,
 	format dbgen.FileFormat,
 	reader io.Reader) (jobs.Snapshot,
@@ -52,23 +69,25 @@ func CreateImport(ctx context.Context,
 	}
 	id := uuid.New()
 	name := id.String() + ".source." + string(format)
-	path, _ := service.Path(name)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.CreateTemp(config.Jobs.Directory, "upload-*")
 	if err != nil {
 		return jobs.Snapshot{}, err
 	}
+	defer os.Remove(file.Name())
 	success := false
 	defer func() {
 		file.Close()
 		if !success {
-			os.Remove(path)
+			cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+			defer stop()
+			store.Delete(cleanup, name)
 		}
 	}()
-	number, err := io.Copy(file, io.LimitReader(reader, service.Config.Jobs.MaxUploadBytes+1))
+	number, err := io.Copy(file, io.LimitReader(reader, config.Jobs.MaxUploadBytes+1))
 	if err != nil {
 		return jobs.Snapshot{}, err
 	}
-	if number > service.Config.Jobs.MaxUploadBytes {
+	if number > config.Jobs.MaxUploadBytes {
 		return jobs.Snapshot{}, ErrUploadTooLarge
 	}
 	if number == 0 {
@@ -77,12 +96,22 @@ func CreateImport(ctx context.Context,
 	if err = file.Sync(); err != nil {
 		return jobs.Snapshot{}, err
 	}
-	if err = file.Close(); err != nil {
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
+		return jobs.Snapshot{}, err
+	}
+	if err = store.Put(ctx, name, file, number); err != nil {
 		return jobs.Snapshot{}, err
 	}
 	data := jobs.Data{Files: []jobs.File{{Role: dbgen.JobFileRoleInput, Key: name, Format: format}}}
 	snapshot, err := service.Create(ctx, id, actor, dbgen.JobTypeUsersimport, data)
 	success = err == nil
+	if err != nil {
+		// При неопределённом результате commit оставляем объект до сверки с БД очисткой.
+		check, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		_, lookupErr := service.Get(check, id)
+		success = !errors.Is(lookupErr, pgx.ErrNoRows)
+	}
 	return snapshot, err
 }
 

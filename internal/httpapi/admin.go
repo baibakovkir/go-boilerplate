@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/twmb/franz-go/pkg/kadm"
 
+	"go-boilerplate/internal/accounts"
 	"go-boilerplate/internal/auth"
 	"go-boilerplate/internal/database/dbgen"
 	"go-boilerplate/internal/jobs"
@@ -71,7 +72,7 @@ func publicAudit(value dbgen.AuditLog) AuditEntry {
 }
 
 func (server *Server) listUsers(ctx context.Context, input UserListInput) ([]auth.PublicAccount, error) {
-	rows, err := server.Auth.DB.Queries.ListUsers(
+	rows, err := server.Queries.ListUsers(
 		ctx,
 		dbgen.ListUsersParams{
 			Limit:         input.Limit,
@@ -100,8 +101,8 @@ func (server *Server) listUsers(ctx context.Context, input UserListInput) ([]aut
 }
 
 func (server *Server) registerAdmin() {
-	huma.Register(
-		server.API,
+	register(
+		server,
 		server.op("GET", "/api/v1/admin/users", "admin-list-users", "List users", auth.Admin),
 		func(ctx context.Context, input *UserListInput) (*UserListOutput, error) {
 			items, err := server.listUsers(ctx, *input)
@@ -113,8 +114,8 @@ func (server *Server) registerAdmin() {
 			return output, nil
 		},
 	)
-	huma.Register(
-		server.API,
+	register(
+		server,
 		server.op("GET", "/api/v1/admin/users/{id}", "admin-get-user", "Get user", auth.Admin),
 		func(ctx context.Context, input *IDInput) (*struct{ Body auth.PublicAccount }, error) {
 			account, err := server.Auth.Account(ctx, auth.User, input.ID)
@@ -127,8 +128,8 @@ func (server *Server) registerAdmin() {
 			return &struct{ Body auth.PublicAccount }{account.PublicAccount}, nil
 		},
 	)
-	huma.Register(
-		server.API,
+	register(
+		server,
 		server.op(
 			"PATCH",
 			"/api/v1/admin/users/{id}/blocked",
@@ -143,46 +144,15 @@ func (server *Server) registerAdmin() {
 			}
 		},
 		) (*MessageOutput, error) {
-			tx, err := server.Auth.DB.Pool.Begin(ctx)
-			if err != nil {
-				return nil, server.Auth.Failure(ctx, "begin block", err)
-			}
-			defer tx.Rollback(ctx)
-			queries := dbgen.New(tx)
-			number, err := queries.SetUserBlocked(
-				ctx,
-				dbgen.SetUserBlockedParams{ID: input.ID, Blocked: input.Body.Blocked},
-			)
-			if err != nil {
-				return nil, server.Auth.Failure(ctx, "block user", err)
-			}
-			if number == 0 {
-				return nil, huma.Error404NotFound("user not found")
-			}
-			action := dbgen.AuditActionUsersunblocked
-			if input.Body.Blocked {
-				action = dbgen.AuditActionUsersblocked
-			}
-			principal := auth.Current(ctx)
-			if err = queries.InsertAudit(ctx,
-				dbgen.InsertAuditParams{
-					ActorType: "admin",
-					ActorID:   principal.ID.String(),
-					Action:    action,
-					ObjectID:  input.ID.String(),
-					Result:    "success",
-					RequestID: auth.RequestID(ctx),
-				}); err != nil {
-				return nil, server.Auth.Failure(ctx, "audit block", err)
-			}
-			if err = tx.Commit(ctx); err != nil {
-				return nil, server.Auth.Failure(ctx, "commit block", err)
+			actor := accounts.Actor{AdminID: auth.Current(ctx).ID, RequestID: auth.RequestID(ctx)}
+			if err := server.Accounts.SetBlocked(ctx, actor, input.ID, input.Body.Blocked); err != nil {
+				return nil, err
 			}
 			return message("user updated; sessions revoked"), nil
 		},
 	)
-	huma.Register(
-		server.API,
+	register(
+		server,
 		server.op(
 			"DELETE",
 			"/api/v1/admin/users/{id}/sessions",
@@ -191,38 +161,15 @@ func (server *Server) registerAdmin() {
 			auth.Admin,
 		),
 		func(ctx context.Context, input *IDInput) (*MessageOutput, error) {
-			tx, err := server.Auth.DB.Pool.Begin(ctx)
-			if err != nil {
-				return nil, server.Auth.Failure(ctx, "begin revoke", err)
-			}
-			defer tx.Rollback(ctx)
-			queries := dbgen.New(tx)
-			number, err := queries.RevokeUserSessions(ctx, input.ID)
-			if err != nil {
-				return nil, server.Auth.Failure(ctx, "revoke user sessions", err)
-			}
-			if number == 0 {
-				return nil, huma.Error404NotFound("user not found")
-			}
-			if err = queries.InsertAudit(ctx,
-				dbgen.InsertAuditParams{
-					ActorType: "admin",
-					ActorID:   auth.Current(ctx).ID.String(),
-					Action:    "users.sessions_revoked",
-					ObjectID:  input.ID.String(),
-					Result:    "success",
-					RequestID: auth.RequestID(ctx),
-				}); err != nil {
-				return nil, server.Auth.Failure(ctx, "audit revoke", err)
-			}
-			if err = tx.Commit(ctx); err != nil {
-				return nil, server.Auth.Failure(ctx, "commit revoke", err)
+			actor := accounts.Actor{AdminID: auth.Current(ctx).ID, RequestID: auth.RequestID(ctx)}
+			if err := server.Accounts.RevokeSessions(ctx, actor, input.ID); err != nil {
+				return nil, err
 			}
 			return message("sessions revoked"), nil
 		},
 	)
-	huma.Register(
-		server.API,
+	register(
+		server,
 		server.op("GET", "/api/v1/admin/audit", "admin-list-audit", "List audit events", auth.Admin),
 		func(ctx context.Context, input *struct {
 			Page
@@ -233,7 +180,7 @@ func (server *Server) registerAdmin() {
 			}
 		}, error,
 		) {
-			rows, err := server.Auth.DB.Queries.ListAudit(
+			rows, err := server.Queries.ListAudit(
 				ctx,
 				dbgen.ListAuditParams{Limit: input.Limit, Offset: input.Offset, ActionFilter: input.Action},
 			)
@@ -252,15 +199,15 @@ func (server *Server) registerAdmin() {
 			return output, nil
 		},
 	)
-	huma.Register(
-		server.API,
+	register(
+		server,
 		server.op("GET", "/api/v1/admin/tables", "admin-list-tables", "List permitted table projections", auth.Admin),
 		func(ctx context.Context, input *struct{}) (*struct{ Body []string }, error) {
 			return &struct{ Body []string }{[]string{"users", "jobs", "audit_logs"}}, nil
 		},
 	)
-	huma.Register(
-		server.API,
+	register(
+		server,
 		server.op(
 			"GET",
 			"/api/v1/admin/tables/{table}",
@@ -293,7 +240,7 @@ func (server *Server) registerAdmin() {
 				}
 				output.Body.Rows = account
 			case "jobs":
-				job, err := server.Auth.DB.Queries.ListJobs(
+				job, err := server.Queries.ListJobs(
 					ctx,
 					dbgen.ListJobsParams{Limit: input.Limit, Offset: input.Offset},
 				)
@@ -306,7 +253,7 @@ func (server *Server) registerAdmin() {
 				}
 				output.Body.Rows = items
 			case "audit_logs":
-				value, err := server.Auth.DB.Queries.ListAudit(
+				value, err := server.Queries.ListAudit(
 					ctx,
 					dbgen.ListAuditParams{Limit: input.Limit, Offset: input.Offset},
 				)
@@ -366,8 +313,8 @@ type KafkaOutput struct {
 }
 
 func (server *Server) registerKafka() {
-	huma.Register(
-		server.API,
+	register(
+		server,
 		server.op(
 			"GET",
 			"/api/v1/admin/kafka",

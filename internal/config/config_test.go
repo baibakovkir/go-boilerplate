@@ -30,6 +30,9 @@ admins:
 	if err != nil {
 		t.Fatal(err)
 	}
+	if config.Jobs.Concurrency != 1 || config.S3.Endpoint != "http://localhost:23900" {
+		t.Fatal("new local defaults not applied")
+	}
 	if config.Postgres.Port != 25433 || config.Jobs.MaxRows != 1000000 || config.Jobs.BatchSize != 500 ||
 		config.Auth.OTPAttempts != 5 {
 		t.Fatal("defaults/overrides not applied")
@@ -49,6 +52,19 @@ admins:
 		t.Fatal("invalid proxy accepted")
 	}
 	config.HTTPServer.TrustedProxies = nil
+	originalS3 := config.S3
+	for _, invalid := range []S3Config{
+		{Region: "garage"},
+		{Bucket: "bucket", Region: "garage", AccessKey: "only-access"},
+		{Bucket: "bucket", Region: "garage", Endpoint: "file:///tmp/data"},
+		{Bucket: "bucket", Region: "garage", Prefix: "../escape"},
+	} {
+		config.S3 = invalid
+		if err = config.Validate(); err == nil {
+			t.Fatalf("invalid S3 config accepted: %#v", invalid)
+		}
+	}
+	config.S3 = originalS3
 	config.Audit.Schedule = "broken"
 	if err = config.Validate(); err == nil {
 		t.Fatal("invalid cron accepted")

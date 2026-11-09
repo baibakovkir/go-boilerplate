@@ -29,12 +29,12 @@ type importRow struct {
 
 // Import обрабатывает файл пакетами и продолжает работу с последней сохранённой позиции.
 func (handlers *Handlers) Import(ctx context.Context, job dbgen.Job, owner string) error {
-	workdir := filepath.Join(handlers.Config.Jobs.Directory, job.ID.String()+".work."+owner)
+	workdir := filepath.Join(handlers.config.Jobs.Directory, job.ID.String()+".work."+owner)
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
 		return err
 	}
 	defer os.RemoveAll(workdir)
-	readerConfig := handlers.Config.Jobs
+	readerConfig := handlers.config.Jobs
 	readerConfig.Directory = workdir
 	data, err := jobs.Decode(job)
 	if err != nil {
@@ -44,9 +44,29 @@ func (handlers *Handlers) Import(ctx context.Context, job dbgen.Job, owner strin
 	if !ok {
 		return jobs.Permanent(dbgen.JobErrorCodeInvalidPayload)
 	}
-	path, err := handlers.Path(input.Key)
+	source, err := handlers.artifacts.Open(ctx, input.Key)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return jobs.Permanent(dbgen.JobErrorCodeInvalidFile)
+		}
+		return err
+	}
+	defer source.Close()
+	if source.Info().Size > handlers.config.Jobs.MaxUploadBytes {
+		return jobs.Permanent(dbgen.JobErrorCodeInvalidFile)
+	}
+	path := filepath.Join(workdir, "source."+string(input.Format))
+	local, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
+	}
+	_, copyErr := io.Copy(local, io.LimitReader(source, handlers.config.Jobs.MaxUploadBytes+1))
+	closeErr := local.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	// Предварительный потоковый проход проверяет файл, заголовок и лимит строк до записи в БД.
 	// На этом этапе пароли не хешируются и файл не удерживается целиком в памяти.
@@ -70,7 +90,7 @@ func (handlers *Handlers) Import(ctx context.Context, job dbgen.Job, owner strin
 				return jobs.Permanent(dbgen.JobErrorCodeInvalidFile)
 			}
 			total++
-			if total > handlers.Config.Jobs.MaxRows {
+			if total > handlers.config.Jobs.MaxRows {
 				reader.Close()
 				return jobs.Permanent(dbgen.JobErrorCodeRowLimitExceeded)
 			}
@@ -87,11 +107,11 @@ func (handlers *Handlers) Import(ctx context.Context, job dbgen.Job, owner strin
 		if total == 0 {
 			return jobs.Permanent(dbgen.JobErrorCodeEmptyFile)
 		}
-		tag, err := handlers.DB.Pool.Exec(
+		tag, err := handlers.db.Pool.Exec(
 			ctx,
 			`
 		UPDATE jobs SET total=$3, version=version+1, updated_at=now() WHERE id=$1 AND
-		lease_owner=$2 AND status='running'
+		lease_owner=$2 AND status='running' AND lease_until>now()
 	`,
 
 			job.ID,
@@ -140,7 +160,7 @@ func (handlers *Handlers) Import(ctx context.Context, job dbgen.Job, owner strin
 		if err = ctx.Err(); err != nil {
 			return err
 		}
-		batch := make([]importRow, 0, handlers.Config.Jobs.BatchSize)
+		batch := make([]importRow, 0, handlers.config.Jobs.BatchSize)
 		for len(batch) < cap(batch) {
 			values, err := reader.Next()
 			if errors.Is(err, io.EOF) {
@@ -163,7 +183,7 @@ func (handlers *Handlers) Import(ctx context.Context, job dbgen.Job, owner strin
 		if len(batch) == 0 {
 			break
 		}
-		if job.Processed+int64(len(batch)) > handlers.Config.Jobs.MaxRows {
+		if job.Processed+int64(len(batch)) > handlers.config.Jobs.MaxRows {
 			return jobs.Permanent(dbgen.JobErrorCodeRowLimitExceeded)
 		}
 		if err = handlers.hashRows(ctx, batch); err != nil {
@@ -177,7 +197,7 @@ func (handlers *Handlers) Import(ctx context.Context, job dbgen.Job, owner strin
 		job.Succeeded += succeeded
 		job.Failed += failed
 		if time.Since(lastPublish) >= time.Second {
-			_ = handlers.Publish(ctx, job.ID)
+			_ = handlers.runtime.Publish(ctx, job.ID)
 			lastPublish = time.Now()
 		}
 	}
@@ -185,7 +205,7 @@ func (handlers *Handlers) Import(ctx context.Context, job dbgen.Job, owner strin
 	if job.Failed > 0 {
 		status = dbgen.JobStatusCompletedWithErrors
 	}
-	return handlers.Finish(ctx, job.ID, owner, status, nil, dbgen.JobErrorCodeNone)
+	return handlers.runtime.Finish(ctx, job.ID, owner, status, nil, dbgen.JobErrorCodeNone)
 }
 
 func (handlers *Handlers) hashRows(ctx context.Context, rows []importRow) error {
@@ -193,7 +213,7 @@ func (handlers *Handlers) hashRows(ctx context.Context, rows []importRow) error 
 	var wg sync.WaitGroup
 	var first error
 	var mu sync.Mutex
-	for number := 0; number < handlers.Config.Jobs.HashWorkers; number++ {
+	for number := 0; number < handlers.config.Jobs.HashWorkers; number++ {
 		wg.Go(func() {
 			for index := range indices {
 				if rows[index].code != "" {
@@ -237,7 +257,7 @@ func (handlers *Handlers) saveBatch(
 	owner string,
 	rows []importRow,
 ) (int64, int64, error) {
-	tx, err := handlers.DB.Pool.Begin(ctx)
+	tx, err := handlers.db.Pool.Begin(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -326,7 +346,7 @@ func (handlers *Handlers) saveBatch(
 		len(rows),
 		succeeded,
 		failed,
-		handlers.Config.Jobs.LeaseTTL.String(),
+		handlers.config.Jobs.LeaseTTL.String(),
 	)
 	if err != nil {
 		return 0, 0, err

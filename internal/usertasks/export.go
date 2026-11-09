@@ -108,9 +108,8 @@ func (handlers *Handlers) Export(ctx context.Context, job dbgen.Job, owner strin
 	if err = json.Unmarshal(data.Input, &input); err != nil || !input.Format.Valid() {
 		return jobs.Permanent(dbgen.JobErrorCodeInvalidPayload)
 	}
-	name := job.ID.String() + ".result." + string(input.Format)
-	final, _ := handlers.Path(name)
-	workdir := filepath.Join(handlers.Config.Jobs.Directory, job.ID.String()+".work."+owner)
+	name := job.ID.String() + ".result." + owner + "." + string(input.Format)
+	workdir := filepath.Join(handlers.config.Jobs.Directory, job.ID.String()+".work."+owner)
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
 		return err
 	}
@@ -125,7 +124,7 @@ func (handlers *Handlers) Export(ctx context.Context, job dbgen.Job, owner strin
 	if err = writer.Write([]string{"id", "email", "blocked", "created_at", "updated_at"}); err != nil {
 		return err
 	}
-	tx, err := handlers.DB.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := handlers.db.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return err
 	}
@@ -142,19 +141,22 @@ func (handlers *Handlers) Export(ctx context.Context, job dbgen.Job, owner strin
 	if err != nil {
 		return err
 	}
-	if total > handlers.Config.Jobs.MaxRows {
+	if total > handlers.config.Jobs.MaxRows {
 		return jobs.Permanent(dbgen.JobErrorCodeRowLimitExceeded)
 	}
-	if _,
-		err = handlers.DB.Pool.Exec(ctx,
+	tag, err := handlers.db.Pool.Exec(ctx,
 		`
 		UPDATE jobs SET total=$3, processed=0, succeeded=0, failed=0, version=version+1,
-		updated_at=now() WHERE id=$1 AND lease_owner=$2
+		updated_at=now() WHERE id=$1 AND lease_owner=$2 AND status='running' AND lease_until>now()
 	`,
 		job.ID,
 		owner,
-		total); err != nil {
+		total)
+	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return jobs.ErrLeaseLost
 	}
 	rows, err := tx.Query(
 		ctx,
@@ -193,11 +195,11 @@ func (handlers *Handlers) Export(ctx context.Context, job dbgen.Job, owner strin
 		}
 		processed++
 		if time.Since(last) >= time.Second {
-			tag, err := handlers.DB.Pool.Exec(
+			tag, err := handlers.db.Pool.Exec(
 				ctx,
 				`
 		UPDATE jobs SET processed=$3, succeeded=$3, version=version+1, updated_at=now() WHERE
-		id=$1 AND lease_owner=$2 AND status='running'
+		id=$1 AND lease_owner=$2 AND status='running' AND lease_until>now()
 	`,
 
 				job.ID,
@@ -212,7 +214,7 @@ func (handlers *Handlers) Export(ctx context.Context, job dbgen.Job, owner strin
 				rows.Close()
 				return jobs.ErrLeaseLost
 			}
-			_ = handlers.Publish(ctx, job.ID)
+			_ = handlers.runtime.Publish(ctx, job.ID)
 			last = time.Now()
 		}
 	}
@@ -229,34 +231,21 @@ func (handlers *Handlers) Export(ctx context.Context, job dbgen.Job, owner strin
 	if err = writer.Close(); err != nil {
 		return err
 	}
-	// Перед публикацией файла проверяем аренду, чтобы устаревший worker не подменил результат.
-	guard, err := handlers.DB.Pool.Begin(ctx)
+	// Уникальный ключ попытки запрещает устаревшему worker перезаписать новый объект.
+	resultFile, err := os.Open(temp)
 	if err != nil {
 		return err
 	}
-	defer guard.Rollback(ctx)
-	var holder string
-	if err = guard.QueryRow(ctx,
-		`
-		SELECT lease_owner FROM jobs WHERE id=$1 AND status='running' FOR UPDATE
-	`,
-		job.ID).Scan(&holder); err != nil {
+	defer resultFile.Close()
+	info, err := resultFile.Stat()
+	if err != nil {
 		return err
 	}
-	if holder != owner {
-		return jobs.ErrLeaseLost
-	}
-	if err = os.Rename(temp, final); err != nil {
+	if err = handlers.artifacts.Put(ctx, name, resultFile, info.Size()); err != nil {
 		return err
 	}
-	if _, err = guard.Exec(ctx, `
-		UPDATE jobs SET processed=$2, succeeded=$2 WHERE id=$1
-	`, job.ID, processed); err != nil {
-		return err
-	}
-	if err = guard.Commit(ctx); err != nil {
-		return err
-	}
+	// Ошибка подтверждения commit может означать уже сохранённый результат.
+	// Объекты без ссылки удаляет отложенная очистка после сверки с БД.
 	data.Files = append(data.Files,
 		jobs.File{
 			Role:   dbgen.JobFileRoleResult,
@@ -265,5 +254,7 @@ func (handlers *Handlers) Export(ctx context.Context, job dbgen.Job, owner strin
 			Name:   "users." + string(input.Format),
 		})
 	data.Result, _ = json.Marshal(map[string]any{"format": input.Format, "count": processed})
-	return handlers.Finish(ctx, job.ID, owner, dbgen.JobStatusCompleted, &data, dbgen.JobErrorCodeNone)
+	data.Progress = &jobs.Progress{Processed: processed, Succeeded: processed}
+	err = handlers.runtime.Finish(ctx, job.ID, owner, dbgen.JobStatusCompleted, &data, dbgen.JobErrorCodeNone)
+	return err
 }

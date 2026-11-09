@@ -15,10 +15,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 
+	"go-boilerplate/internal/artifacts"
 	"go-boilerplate/internal/auth"
 	appconfig "go-boilerplate/internal/config"
 	"go-boilerplate/internal/database"
 	"go-boilerplate/internal/database/dbgen"
+	"go-boilerplate/internal/telemetry"
 )
 
 // File описывает сохранённый файл любой задачи. Key не передаётся клиенту API.
@@ -31,7 +33,15 @@ type File struct {
 
 // Data хранит расширяемые данные обработчика без предметных колонок в общей jobs.
 // Input и Checkpoint закрыты от клиента; Result содержит только публичный результат.
+// Progress задаёт окончательные счётчики, сохраняемые вместе с результатом.
+type Progress struct {
+	Processed int64
+	Succeeded int64
+	Failed    int64
+}
+
 type Data struct {
+	Progress   *Progress       `json:"-"`
 	Input      json.RawMessage `json:"input,omitempty"`
 	Result     json.RawMessage `json:"result,omitempty"`
 	Checkpoint json.RawMessage `json:"checkpoint,omitempty"`
@@ -156,14 +166,22 @@ type Handler func(context.Context, dbgen.Job, string) error
 
 // Service хранит общее состояние; обработчики регистрируются при сборке приложения.
 type Service struct {
-	DB       *database.Store
-	Redis    *redis.Client
-	Config   *appconfig.Config
-	handlers map[dbgen.JobType]Handler
+	db        *database.Store
+	redis     *redis.Client
+	config    *appconfig.Config
+	handlers  map[dbgen.JobType]Handler
+	artifacts artifacts.Store
+	metrics   *telemetry.Metrics
 }
 
 // New подготавливает файловое хранилище и пустой реестр обработчиков.
-func New(db *database.Store, redisClient *redis.Client, config *appconfig.Config) (*Service, error) {
+func New(
+	db *database.Store,
+	redisClient *redis.Client,
+	config *appconfig.Config,
+	store artifacts.Store,
+	metrics *telemetry.Metrics,
+) (*Service, error) {
 	dir, err := filepath.Abs(config.Jobs.Directory)
 	if err != nil {
 		return nil, err
@@ -172,7 +190,14 @@ func New(db *database.Store, redisClient *redis.Client, config *appconfig.Config
 	if err = os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Service{DB: db, Redis: redisClient, Config: config, handlers: make(map[dbgen.JobType]Handler)}, nil
+	return &Service{
+		db:        db,
+		redis:     redisClient,
+		config:    config,
+		handlers:  make(map[dbgen.JobType]Handler),
+		artifacts: store,
+		metrics:   metrics,
+	}, nil
 }
 
 // Register вызывается до старта HTTP и worker; повторная регистрация — ошибка конфигурации.
@@ -199,14 +224,6 @@ func (service *Service) Execute(ctx context.Context, job dbgen.Job, owner string
 	return handler(ctx, job, owner)
 }
 
-// Path ограничивает доступ серверным именем внутри директории задач.
-func (service *Service) Path(name string) (string, error) {
-	if name == "" || filepath.Base(name) != name || strings.ContainsAny(name, "/\\") {
-		return "", fmt.Errorf("invalid artifact name")
-	}
-	return filepath.Join(service.Config.Jobs.Directory, name), nil
-}
-
 // Create фиксирует задачу, аудит и outbox одной транзакцией для любого автора.
 // Разрешение запускать конкретную операцию проверяет её прикладной endpoint.
 func (service *Service) Create(ctx context.Context,
@@ -229,7 +246,7 @@ func (service *Service) Create(ctx context.Context,
 	if _, err = Decode(dbgen.Job{Data: raw}); err != nil {
 		return Snapshot{}, err
 	}
-	tx, err := service.DB.Pool.Begin(ctx)
+	tx, err := service.db.Pool.Begin(ctx)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -278,7 +295,7 @@ func (service *Service) Create(ctx context.Context,
 
 // Publish уведомляет клиентов; потеря Pub/Sub не меняет сохранённое состояние.
 func (service *Service) Publish(ctx context.Context, id uuid.UUID) error {
-	job, err := service.DB.Queries.GetJob(ctx, id)
+	job, err := service.db.Queries.GetJob(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -286,12 +303,16 @@ func (service *Service) Publish(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return err
 	}
-	return service.Redis.Publish(ctx, service.Config.Redis.Prefix+"job:"+id.String(), raw).Err()
+	err = service.redis.Publish(ctx, service.config.Redis.Prefix+"job:"+id.String(), raw).Err()
+	if err != nil {
+		service.metrics.Event("pubsub_error", string(job.Type))
+	}
+	return err
 }
 
 // Claim захватывает готовую задачу или задачу с истёкшей арендой.
 func (service *Service) Claim(ctx context.Context, id uuid.UUID, owner string) (dbgen.Job, error) {
-	tx, err := service.DB.Pool.Begin(ctx)
+	tx, err := service.db.Pool.Begin(ctx)
 	if err != nil {
 		return dbgen.Job{}, err
 	}
@@ -306,8 +327,8 @@ func (service *Service) Claim(ctx context.Context, id uuid.UUID, owner string) (
 	`,
 		id,
 		owner,
-		service.Config.Jobs.LeaseTTL.String(),
-		service.Config.Jobs.MaxAttempts)
+		service.config.Jobs.LeaseTTL.String(),
+		service.config.Jobs.MaxAttempts)
 	if err != nil {
 		return dbgen.Job{}, err
 	}
@@ -327,14 +348,14 @@ func (service *Service) Claim(ctx context.Context, id uuid.UUID, owner string) (
 // Heartbeat не позволяет устаревшему владельцу продлить чужую аренду.
 func (service *Service) Heartbeat(ctx context.Context, id uuid.UUID, owner string) error {
 	tag,
-		err := service.DB.Pool.Exec(ctx,
+		err := service.db.Pool.Exec(ctx,
 		`
 		UPDATE jobs SET lease_until=now()+$3::interval WHERE id=$1 AND lease_owner=$2 AND
-		status='running'
+		status='running' AND lease_until>now()
 	`,
 		id,
 		owner,
-		service.Config.Jobs.LeaseTTL.String())
+		service.config.Jobs.LeaseTTL.String())
 	if err != nil {
 		return err
 	}
@@ -377,12 +398,24 @@ func (service *Service) Finish(ctx context.Context,
 	if !Terminal(status) || !code.Valid() {
 		return fmt.Errorf("invalid job outcome")
 	}
-	tx, err := service.DB.Pool.Begin(ctx)
+	tx, err := service.db.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	if data != nil {
+		if progress := data.Progress; progress != nil {
+			if progress.Processed < 0 || progress.Succeeded < 0 || progress.Failed < 0 ||
+				progress.Processed != progress.Succeeded+progress.Failed {
+				return fmt.Errorf("invalid job progress")
+			}
+			_, err := tx.Exec(ctx, `UPDATE jobs SET processed=$3,succeeded=$4,failed=$5
+WHERE id=$1 AND lease_owner=$2 AND status='running' AND lease_until>now()`,
+				id, owner, progress.Processed, progress.Succeeded, progress.Failed)
+			if err != nil {
+				return err
+			}
+		}
 		raw, err := json.Marshal(data)
 		if err != nil {
 			return err
@@ -390,7 +423,7 @@ func (service *Service) Finish(ctx context.Context,
 		if _,
 			err = tx.Exec(ctx,
 			`
-		UPDATE jobs SET data=$3 WHERE id=$1 AND lease_owner=$2 AND status='running'
+		UPDATE jobs SET data=$3 WHERE id=$1 AND lease_owner=$2 AND status='running' AND lease_until>now()
 	`,
 			id,
 			owner,
@@ -406,7 +439,7 @@ func (service *Service) Finish(ctx context.Context,
 		err := tx.Exec(ctx,
 		`
 		UPDATE jobs SET status=$3, error_code=$4, error=$5, version=version+1,
-		lease_owner='', updated_at=now() WHERE id=$1 AND lease_owner=$2 AND status='running'
+		lease_owner='', updated_at=now() WHERE id=$1 AND lease_owner=$2 AND status='running' AND lease_until>now()
 	`,
 		id,
 		owner,

@@ -17,7 +17,7 @@ import (
 
 // RemoveInputs удаляет закрытые входные файлы завершённой задачи и их ключи из data.
 func (service *Service) RemoveInputs(ctx context.Context, id uuid.UUID) error {
-	job, err := service.DB.Queries.GetJob(ctx, id)
+	job, err := service.db.Queries.GetJob(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -34,7 +34,7 @@ func (service *Service) RemoveInputs(ctx context.Context, id uuid.UUID) error {
 			kept = append(kept, file)
 			continue
 		}
-		if err = service.removeFile(file); err != nil {
+		if err = service.artifacts.Delete(ctx, file.Key); err != nil {
 			return err
 		}
 	}
@@ -42,27 +42,16 @@ func (service *Service) RemoveInputs(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return err
 	}
-	_, err = service.DB.Pool.Exec(ctx, `
+	_, err = service.db.Pool.Exec(ctx, `
 		UPDATE jobs SET data=jsonb_set(data, '{files}', $2, true) WHERE id=$1
 	`, id, raw)
 	return err
 }
 
-func (service *Service) removeFile(file File) error {
-	path, err := service.Path(file.Key)
-	if err != nil {
-		return err
-	}
-	if err = os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
 // CleanupFiles очищает файлы и общую диагностику; содержимое Input принадлежит обработчику.
 func (service *Service) CleanupFiles(ctx context.Context) error {
 	rows,
-		err := service.DB.Pool.Query(ctx,
+		err := service.db.Pool.Query(ctx,
 		`
 		SELECT id FROM jobs WHERE status IN ('completed', 'completed_with_errors', 'failed')
 		AND NOT artifacts_expired
@@ -87,11 +76,11 @@ func (service *Service) CleanupFiles(ctx context.Context) error {
 		if err = service.RemoveInputs(ctx, id); err != nil {
 			return err
 		}
-		job, err := service.DB.Queries.GetJob(ctx, id)
+		job, err := service.db.Queries.GetJob(ctx, id)
 		if err != nil {
 			return err
 		}
-		if time.Since(job.UpdatedAt) < service.Config.Jobs.ArtifactTTL {
+		if time.Since(job.UpdatedAt) < service.config.Jobs.ArtifactTTL {
 			continue
 		}
 		data, err := Decode(job)
@@ -99,11 +88,11 @@ func (service *Service) CleanupFiles(ctx context.Context) error {
 			return err
 		}
 		for _, file := range data.Files {
-			if err = service.removeFile(file); err != nil {
+			if err = service.artifacts.Delete(ctx, file.Key); err != nil {
 				return err
 			}
 		}
-		tx, err := service.DB.Pool.Begin(ctx)
+		tx, err := service.db.Pool.Begin(ctx)
 		if err != nil {
 			return err
 		}
@@ -127,7 +116,10 @@ func (service *Service) CleanupFiles(ctx context.Context) error {
 			return err
 		}
 	}
-	entries, err := os.ReadDir(service.Config.Jobs.Directory)
+	if err := service.cleanupObjects(ctx); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(service.config.Jobs.Directory)
 	if err != nil {
 		return err
 	}
@@ -150,7 +142,7 @@ func (service *Service) CleanupFiles(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
-		job, err := service.DB.Queries.GetJob(ctx, id)
+		job, err := service.db.Queries.GetJob(ctx, id)
 		keep := false
 		if err == nil {
 			keep = !Terminal(job.Status)
@@ -169,7 +161,7 @@ func (service *Service) CleanupFiles(ctx context.Context) error {
 			return err
 		}
 		if !keep {
-			path := filepath.Join(service.Config.Jobs.Directory, name)
+			path := filepath.Join(service.config.Jobs.Directory, name)
 			if entry.IsDir() {
 				err = os.RemoveAll(path)
 			} else {
@@ -181,4 +173,52 @@ func (service *Service) CleanupFiles(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// cleanupObjects удаляет осиротевшие объекты только после защитного срока.
+func (service *Service) cleanupObjects(ctx context.Context) error {
+	cursor := ""
+	for {
+		objects, next, err := service.artifacts.List(ctx, cursor)
+		if err != nil {
+			return err
+		}
+		for _, object := range objects {
+			if time.Since(object.Modified) < 24*time.Hour {
+				continue
+			}
+			if len(object.Key) < 36 {
+				continue
+			}
+			id, err := uuid.Parse(object.Key[:36])
+			if err != nil {
+				continue
+			}
+			job, err := service.Get(ctx, id)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			keep := err == nil && !Terminal(job.Status)
+			if err == nil && !job.ArtifactsExpired {
+				data, decodeErr := Decode(job)
+				if decodeErr != nil {
+					return decodeErr
+				}
+				for _, file := range data.Files {
+					if file.Key == object.Key {
+						keep = true
+					}
+				}
+			}
+			if !keep {
+				if err := service.artifacts.Delete(ctx, object.Key); err != nil {
+					return err
+				}
+			}
+		}
+		if next == "" {
+			return nil
+		}
+		cursor = next
+	}
 }

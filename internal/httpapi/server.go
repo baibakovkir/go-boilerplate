@@ -25,14 +25,26 @@ import (
 	swaggerFiles "github.com/swaggo/files/v2"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"go-boilerplate/internal/accounts"
+	"go-boilerplate/internal/artifacts"
 	"go-boilerplate/internal/auth"
 	appconfig "go-boilerplate/internal/config"
 	"go-boilerplate/internal/jobs"
+	"go-boilerplate/internal/readmodel"
+	"go-boilerplate/internal/realtime"
 	"go-boilerplate/internal/security"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // Server связывает маршруты, middleware и сервисы API; управляет длительными соединениями.
 type Server struct {
+	Artifacts    artifacts.Store
+	Queries      *readmodel.Service
+	Realtime     *realtime.Service
+	Redis        *redis.Client
+	Ready        func(context.Context) error
+	Accounts     *accounts.Service
 	Auth         *auth.Service
 	Jobs         *jobs.Service
 	Config       *appconfig.Config
@@ -48,25 +60,39 @@ type Server struct {
 var errorFactoryOnce sync.Once
 
 // New регистрирует API и middleware; HTTP-сервер запускается отдельно методом Serve.
-func New(
-	serviceValue *auth.Service,
-	service *jobs.Service,
-	config *appconfig.Config,
-	logger *slog.Logger,
-) (*Server, error) {
-	key, err := kgo.NewClient(kgo.SeedBrokers(config.Kafka.Brokers...))
-	if err != nil {
-		return nil, err
-	}
+// Dependencies перечисляет сервисы и проверки, собранные в cmd.
+type Dependencies struct {
+	Artifacts artifacts.Store
+	Auth      *auth.Service
+	Accounts  *accounts.Service
+	Jobs      *jobs.Service
+	Queries   *readmodel.Service
+	Realtime  *realtime.Service
+	Redis     *redis.Client
+	Kafka     *kgo.Client
+	Ready     func(context.Context) error
+	Config    *appconfig.Config
+	Log       *slog.Logger
+}
+
+func New(deps Dependencies) (*Server, error) {
+	config, logger := deps.Config, deps.Log
+	serviceValue, service := deps.Auth, deps.Jobs
 	lifetime, stopRealtime := context.WithCancel(context.Background())
 	server := &Server{
 		lifetime:     lifetime,
 		stopRealtime: stopRealtime,
+		Accounts:     deps.Accounts,
+		Artifacts:    deps.Artifacts,
+		Queries:      deps.Queries,
+		Realtime:     deps.Realtime,
+		Redis:        deps.Redis,
+		Ready:        deps.Ready,
 		Auth:         serviceValue,
 		Jobs:         service,
 		Config:       config,
 		Log:          logger,
-		Kafka:        key,
+		Kafka:        deps.Kafka,
 		wsSlots:      make(chan struct{}, 128),
 	}
 	reader := chi.NewRouter()
@@ -130,12 +156,8 @@ func New(
 	reader.Get("/health/ready", func(response http.ResponseWriter, request *http.Request) {
 		ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
 		defer cancel()
-		if err := serviceValue.DB.Pool.Ping(ctx); err != nil {
-			server.rawError(response, request, serviceValue.Failure(ctx, "readiness postgres", err))
-			return
-		}
-		if err := serviceValue.Redis.Ping(ctx).Err(); err != nil {
-			server.rawError(response, request, serviceValue.Failure(ctx, "readiness redis", err))
+		if err := server.Ready(ctx); err != nil {
+			server.rawError(response, request, err)
 			return
 		}
 		writeJSON(response, 200, map[string]string{"status": "ready"})
@@ -152,7 +174,6 @@ func New(
 // Close завершает подписки WebSocket и закрывает клиент Kafka.
 func (server *Server) Close() {
 	server.stopRealtime()
-	server.Kafka.Close()
 }
 
 // Serve обслуживает HTTP до отмены контекста, затем завершает соединения с ограниченным ожиданием.
@@ -191,6 +212,7 @@ func writeJSON(response http.ResponseWriter, status int, value any) {
 }
 
 func (server *Server) rawError(response http.ResponseWriter, request *http.Request, err error) {
+	err = transportError(request.Context(), server.Log, err)
 	status := 500
 	var se huma.StatusError
 	if errors.As(err, &se) {
@@ -219,7 +241,8 @@ func (server *Server) require(role auth.Role) func(huma.Context, func(huma.Conte
 		}
 		principal, err := server.Auth.Authenticate(ctx.Context(), strings.TrimPrefix(raw, "Bearer "), role)
 		if err != nil {
-			_ = huma.WriteErr(server.API, ctx, statusOf(err), err.Error())
+			mapped := transportError(ctx.Context(), server.Log, err)
+			_ = huma.WriteErr(server.API, ctx, statusOf(mapped), mapped.Error())
 			return
 		}
 		next(huma.WithContext(ctx, auth.WithPrincipal(ctx.Context(), principal)))
@@ -397,7 +420,7 @@ func (server *Server) securityMiddleware(next http.Handler) http.Handler {
 		rateCtx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
 		allowed, err := security.Allow(
 			rateCtx,
-			server.Auth.Redis,
+			server.Redis,
 			server.Config.Redis.Prefix,
 			"http:"+server.clientIP(request),
 			server.Config.HTTPServer.RatePerMinute,

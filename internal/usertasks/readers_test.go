@@ -12,7 +12,6 @@ import (
 	"github.com/xuri/excelize/v2"
 
 	appconfig "go-boilerplate/internal/config"
-	"go-boilerplate/internal/jobs"
 )
 
 func TestReadersAndLimits(t *testing.T) {
@@ -94,7 +93,7 @@ func TestMillionRows(t *testing.T) {
 			dir := t.TempDir()
 			config := appconfig.JobsConfig{Directory: dir, MaxUnzipBytes: 2 << 30}
 			path := filepath.Join(dir, "million."+format)
-			service := &Handlers{Service: &jobs.Service{Config: &appconfig.Config{Jobs: config}}}
+			service := &Handlers{config: &appconfig.Config{Jobs: config}}
 			writer, err := service.writer(path, format)
 			if err != nil {
 				t.Fatal(err)
