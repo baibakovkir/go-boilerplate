@@ -55,6 +55,7 @@ smtp:
   tls: none # none (только local), starttls или tls
 
 jobs:
+  concurrency: 1
   directory: var/jobs
   max_rows: 1000000
   max_upload_bytes: 536870912

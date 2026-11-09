@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -442,5 +443,9 @@ func (service *Service) Finish(ctx context.Context,
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
-	return service.Publish(ctx, id)
+	// Commit уже определил результат. Сбой уведомления не является сбоем операции.
+	if err := service.Publish(ctx, id); err != nil {
+		slog.ErrorContext(ctx, "publish committed job", "job_id", id, "error", err)
+	}
+	return nil
 }

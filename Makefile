@@ -42,7 +42,7 @@ test:
 	go test ./...
 
 integration:
-	RUN_INTEGRATION=1 go test ./internal/httpapi -run TestIntegration -count=1 -v
+	RUN_INTEGRATION=1 go test ./internal/httpapi -run TestIntegration -count=1 -timeout=10m -v
 
 check: lint
 	go test -race ./...

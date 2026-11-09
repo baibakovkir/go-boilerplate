@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,5 +71,15 @@ func TestDatabaseCredentialsEscaped(t *testing.T) {
 	parts, _ := parsedURL.User.Password()
 	if parsedURL.User.Username() != config.User || parts != config.Password || parsedURL.Host != "[::1]:5432" {
 		t.Fatal("credentials were not escaped correctly")
+	}
+}
+
+func TestJobConcurrencyBounds(t *testing.T) {
+	for _, concurrency := range []int{0, -1, 33} {
+		config := Config{}
+		config.Jobs.Concurrency = concurrency
+		if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "jobs.concurrency") {
+			t.Fatalf("concurrency %d: expected concurrency validation error, got %v", concurrency, err)
+		}
 	}
 }

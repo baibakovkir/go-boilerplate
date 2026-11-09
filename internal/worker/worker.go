@@ -28,7 +28,7 @@ type Worker struct {
 	slot  chan struct{}
 }
 
-// New создаёт клиент Kafka и исполнитель с одной одновременно обрабатываемой задачей.
+// New создаёт клиент Kafka и исполнитель с настраиваемым числом параллельных задач.
 func New(service *jobs.Service, logger *slog.Logger) (*Worker, error) {
 	config, err := kgo.NewClient(
 		kgo.SeedBrokers(service.Config.Kafka.Brokers...),
@@ -40,7 +40,12 @@ func New(service *jobs.Service, logger *slog.Logger) (*Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Worker{Jobs: service, Kafka: config, Log: logger, slot: make(chan struct{}, 1)}, nil
+	return &Worker{
+		Jobs:  service,
+		Kafka: config,
+		Log:   logger,
+		slot:  make(chan struct{}, service.Config.Jobs.Concurrency),
+	}, nil
 }
 
 // Run обрабатывает задания до отмены контекста и ожидает остановки фоновых циклов.

@@ -105,6 +105,8 @@ type SMTPConfig struct {
 
 // JobsConfig ограничивает размер файлов, обработку пакетов и срок хранения результатов.
 type JobsConfig struct {
+	// Concurrency ограничивает число одновременно исполняемых задач одним worker.
+	Concurrency    int           `yaml:"concurrency" env:"JOBS_CONCURRENCY" env-default:"1"`
 	Directory      string        `yaml:"directory" env:"JOBS_DIRECTORY" env-default:"var/jobs"`
 	MaxRows        int64         `yaml:"max_rows" env-default:"1000000"`
 	MaxUploadBytes int64         `yaml:"max_upload_bytes" env-default:"536870912"`
@@ -146,6 +148,9 @@ func Load() (*Config, error) {
 
 // Validate отклоняет небезопасные или некорректные настройки до запуска зависимостей.
 func (config *Config) Validate() error {
+	if config.Jobs.Concurrency < 1 || config.Jobs.Concurrency > 32 {
+		return fmt.Errorf("jobs.concurrency must be between 1 and 32")
+	}
 	if _, err := cron.ParseStandard(config.Audit.Schedule); err != nil {
 		return fmt.Errorf("invalid audit.schedule: %w", err)
 	}
