@@ -26,6 +26,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"go-boilerplate/internal/accounts"
+	"go-boilerplate/internal/apperror"
 	"go-boilerplate/internal/artifacts"
 	"go-boilerplate/internal/auth"
 	appconfig "go-boilerplate/internal/config"
@@ -428,7 +429,7 @@ func (server *Server) securityMiddleware(next http.Handler) http.Handler {
 		)
 		cancel()
 		if err != nil {
-			server.rawError(response, request, server.Auth.Failure(request.Context(), "global rate limit", err))
+			server.rawError(response, request, apperror.Failure("global rate limit", err))
 			return
 		}
 		if !allowed {

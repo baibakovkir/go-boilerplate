@@ -11,6 +11,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 
 	"go-boilerplate/internal/accounts"
+	"go-boilerplate/internal/apperror"
 	"go-boilerplate/internal/auth"
 	"go-boilerplate/internal/database/dbgen"
 	"go-boilerplate/internal/jobs"
@@ -82,7 +83,7 @@ func (server *Server) listUsers(ctx context.Context, input UserListInput) ([]aut
 		},
 	)
 	if err != nil {
-		return nil, server.Auth.Failure(ctx, "list users", err)
+		return nil, apperror.Failure("list users", err)
 	}
 	items := make([]auth.PublicAccount, 0, len(rows))
 	for _, value := range rows {
@@ -123,7 +124,7 @@ func (server *Server) registerAdmin() {
 				return nil, huma.Error404NotFound("user not found")
 			}
 			if err != nil {
-				return nil, server.Auth.Failure(ctx, "get user", err)
+				return nil, apperror.Failure("get user", err)
 			}
 			return &struct{ Body auth.PublicAccount }{account.PublicAccount}, nil
 		},
@@ -185,7 +186,7 @@ func (server *Server) registerAdmin() {
 				dbgen.ListAuditParams{Limit: input.Limit, Offset: input.Offset, ActionFilter: input.Action},
 			)
 			if err != nil {
-				return nil, server.Auth.Failure(ctx, "list audit", err)
+				return nil, apperror.Failure("list audit", err)
 			}
 			output := &struct {
 				Body struct {
@@ -245,7 +246,7 @@ func (server *Server) registerAdmin() {
 					dbgen.ListJobsParams{Limit: input.Limit, Offset: input.Offset},
 				)
 				if err != nil {
-					return nil, server.Auth.Failure(ctx, "browse jobs", err)
+					return nil, apperror.Failure("browse jobs", err)
 				}
 				items := []jobs.Snapshot{}
 				for _, job := range job {
@@ -258,7 +259,7 @@ func (server *Server) registerAdmin() {
 					dbgen.ListAuditParams{Limit: input.Limit, Offset: input.Offset},
 				)
 				if err != nil {
-					return nil, server.Auth.Failure(ctx, "browse audit", err)
+					return nil, apperror.Failure("browse audit", err)
 				}
 				items := []AuditEntry{}
 				for _, reader := range value {
@@ -328,11 +329,11 @@ func (server *Server) registerKafka() {
 			admin := kadm.NewClient(server.Kafka)
 			topics, err := admin.ListTopics(ctx)
 			if err != nil {
-				return nil, server.Auth.Failure(ctx, "list kafka topics", err)
+				return nil, apperror.Failure("list kafka topics", err)
 			}
 			groups, err := admin.ListGroups(ctx)
 			if err != nil {
-				return nil, server.Auth.Failure(ctx, "list kafka groups", err)
+				return nil, apperror.Failure("list kafka groups", err)
 			}
 			output := &KafkaOutput{}
 			output.Body.Topics = []KafkaTopic{}
@@ -350,7 +351,7 @@ func (server *Server) registerKafka() {
 			if len(groups) > 0 {
 				lags, err := admin.Lag(ctx, groups.Groups()...)
 				if err != nil {
-					return nil, server.Auth.Failure(ctx, "inspect kafka lag", err)
+					return nil, apperror.Failure("inspect kafka lag", err)
 				}
 				for _, value := range groups.Sorted() {
 					lag, ok := lags[value.Group]

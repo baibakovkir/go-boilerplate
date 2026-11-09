@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -234,6 +237,8 @@ func verifyArchitecture(t *testing.T, db *database.Store, redisClient *redis.Cli
 			t.Fatal("terminal task claimed twice", err)
 		}
 	})
+	t.Run("stale-export", func(t *testing.T) { verifyStaleExport(t, db, redisClient, config, store) })
+	t.Run("artifact-cleanup", func(t *testing.T) { verifyArtifactCleanup(t, db, redisClient, config, store) })
 	t.Run("metrics-and-storage-failure", func(t *testing.T) {
 		metrics := telemetry.New()
 		metrics.Database(db)
@@ -272,4 +277,213 @@ func verifyArchitecture(t *testing.T, db *database.Store, redisClient *redis.Cli
 			t.Fatal("missing S3 failure metric")
 		}
 	})
+}
+
+// agedArtifacts меняет только часы списка, оставляя операции настоящему Garage.
+type agedArtifacts struct{ artifacts.Store }
+
+func (store agedArtifacts) List(ctx context.Context, cursor string) ([]artifacts.Object, string, error) {
+	objects, next, err := store.Store.List(ctx, cursor)
+	for index := range objects {
+		objects[index].Modified = time.Now().Add(-25 * time.Hour)
+	}
+	return objects, next, err
+}
+
+func verifyArtifactCleanup(t *testing.T, db *database.Store, redisClient *redis.Client,
+	config *appconfig.Config, store artifacts.Store,
+) {
+	ctx := context.Background()
+	metrics := telemetry.New()
+	service, err := jobs.New(db, redisClient, config, agedArtifacts{store}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = usertasks.Register(service, db, config, store); err != nil {
+		t.Fatal(err)
+	}
+
+	abandoned := filepath.Join(config.Jobs.Directory, uuid.NewString()+".upload-abandoned")
+	if err = os.WriteFile(abandoned, []byte("test-input"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-25 * time.Hour)
+	if err = os.Chtimes(abandoned, old, old); err != nil {
+		t.Fatal(err)
+	}
+	orphan := uuid.NewString() + ".orphan"
+	if err = store.Put(ctx, orphan, bytes.NewReader([]byte("orphan")), 6); err != nil {
+		t.Fatal(err)
+	}
+	activeID := uuid.New()
+	activeKey := activeID.String() + ".source.csv"
+	if err = store.Put(ctx, activeKey, bytes.NewReader([]byte("input")), 5); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Create(ctx, activeID, jobs.Actor{}, dbgen.JobTypeUsersimport,
+		jobs.Data{Files: []jobs.File{{Role: dbgen.JobFileRoleInput, Key: activeKey, Format: dbgen.FileFormatCsv}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredID := uuid.New()
+	expiredKey := expiredID.String() + ".result.csv"
+	if err = store.Put(ctx, expiredKey, bytes.NewReader([]byte("result")), 6); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Create(ctx, expiredID, jobs.Actor{}, dbgen.JobTypeUsersexport,
+		jobs.Data{Files: []jobs.File{{Role: dbgen.JobFileRoleResult, Key: expiredKey, Format: dbgen.FileFormatCsv}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := uuid.NewString()
+	if _, err = service.Claim(ctx, expiredID, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Finish(ctx, expiredID, owner, dbgen.JobStatusCompleted, nil, dbgen.JobErrorCodeNone); err != nil {
+		t.Fatal(err)
+	}
+	// Сначала объект завершённой задачи должен пережить очистку до истечения TTL.
+	if err = service.CleanupFiles(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if reader, err := store.Open(ctx, expiredKey); err != nil {
+		t.Fatal("live result deleted", err)
+	} else {
+		reader.Close()
+	}
+	if _, err = db.Pool.Exec(
+		ctx, "UPDATE jobs SET updated_at=now()-interval '8 days' WHERE id=$1", expiredID); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 2; index++ {
+		if err = service.CleanupFiles(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = os.Stat(abandoned); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("abandoned local upload not collected", err)
+	}
+	for _, key := range []string{orphan, expiredKey} {
+		if reader, err := store.Open(ctx, key); !errors.Is(err, os.ErrNotExist) {
+			if reader != nil {
+				reader.Close()
+			}
+			t.Fatalf("object not collected: %s: %v", key, err)
+		}
+	}
+	if reader, err := store.Open(ctx, activeKey); err != nil {
+		t.Fatal("active source deleted", err)
+	} else {
+		reader.Close()
+	}
+	// Не оставляем queued-задачу для теста нескольких процессов.
+	if _, err = service.Claim(ctx, activeID, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Finish(ctx, activeID, owner, dbgen.JobStatusCompleted, nil, dbgen.JobErrorCodeNone); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.RemoveInputs(ctx, activeID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gatedArtifacts останавливает публикацию попытки после реальной загрузки в S3.
+type gatedArtifacts struct {
+	artifacts.Store
+	uploaded chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+func (store *gatedArtifacts) Put(ctx context.Context, key string, body io.ReadSeeker, size int64) error {
+	if err := store.Store.Put(ctx, key, body, size); err != nil {
+		return err
+	}
+	store.once.Do(func() { close(store.uploaded) })
+	select {
+	case <-store.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func verifyStaleExport(t *testing.T, db *database.Store, redisClient *redis.Client,
+	config *appconfig.Config, store artifacts.Store,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	gated := &gatedArtifacts{Store: store, uploaded: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gated.release) }) }
+	defer release()
+	metrics := telemetry.New()
+	service, err := jobs.New(db, redisClient, config, gated, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = usertasks.Register(service, db, config, gated); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := usertasks.CreateExport(
+		ctx,
+		service,
+		jobs.Actor{},
+		usertasks.ExportOptions{Format: dbgen.FileFormatCsv},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOwner := uuid.NewString()
+	job, err := service.Claim(ctx, snapshot.ID, oldOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- service.Execute(ctx, job, oldOwner) }()
+	select {
+	case <-gated.uploaded:
+	case <-ctx.Done():
+		t.Fatal("export upload did not reach gate")
+	}
+	if _, err = db.Pool.Exec(
+		ctx, "UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id=$1", job.ID); err != nil {
+		t.Fatal(err)
+	}
+	newOwner := uuid.NewString()
+	newJob, err := service.Claim(ctx, job.ID, newOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err = <-done; !errors.Is(err, jobs.ErrLeaseLost) {
+		t.Fatalf("old exporter published result: %v", err)
+	}
+	state, err := service.Get(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := jobs.Decode(state)
+	if err != nil || len(data.Files) != 0 {
+		t.Fatal("stale result reference persisted", err)
+	}
+	if err = service.Execute(ctx, newJob, newOwner); err != nil {
+		t.Fatal(err)
+	}
+	state, err = service.Get(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = jobs.Decode(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := data.FindFile(dbgen.JobFileRoleResult)
+	if !ok || !strings.Contains(result.Key, newOwner) || strings.Contains(result.Key, oldOwner) {
+		t.Fatal("wrong export attempt visible", result.Key)
+	}
+	if state.Status != dbgen.JobStatusCompleted {
+		t.Fatal(state.Status)
+	}
 }

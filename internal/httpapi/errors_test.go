@@ -5,8 +5,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	appconfig "go-boilerplate/internal/config"
 
 	"go-boilerplate/internal/apperror"
 )
@@ -33,5 +36,34 @@ func TestApplicationErrors(t *testing.T) {
 		if statusOf(mapped) != 503 || strings.Contains(mapped.Error(), "private") {
 			t.Fatalf("unsafe error: %v", mapped)
 		}
+	}
+}
+
+func TestReadinessFailures(t *testing.T) {
+	for _, dependency := range []string{"postgres", "redis", "artifacts"} {
+		t.Run(dependency, func(t *testing.T) {
+			server, err := New(
+				Dependencies{
+					Config: &appconfig.Config{}, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+					Ready: func(context.Context) error {
+						return apperror.Failure(dependency, errors.New("private credentials"))
+					},
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+			response := httptest.NewRecorder()
+			server.Router.ServeHTTP(response, httptest.NewRequest("GET", "/health/ready", nil))
+			if response.Code != 503 || strings.Contains(response.Body.String(), "private") {
+				t.Fatal(response.Code, response.Body.String())
+			}
+			response = httptest.NewRecorder()
+			server.Router.ServeHTTP(response, httptest.NewRequest("GET", "/health/live", nil))
+			if response.Code != 200 {
+				t.Fatal(response.Code)
+			}
+		})
 	}
 }

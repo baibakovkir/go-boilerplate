@@ -107,35 +107,43 @@ func (worker *Worker) Run(ctx context.Context) error {
 			}
 		}
 	})
+consume:
 	for ctx.Err() == nil {
-		records := worker.Kafka.PollRecords(ctx, 10)
+		// Резервируем слот до чтения: не удерживаем пачку сообщений при занятом пуле.
+		select {
+		case worker.slot <- struct{}{}:
+		case <-ctx.Done():
+			break consume
+		}
+		records := worker.Kafka.PollRecords(ctx, 1)
 		for _, fetchErr := range records.Errors() {
 			if ctx.Err() == nil {
+				worker.metrics.Event("kafka_error", "")
 				worker.Log.Error("consume kafka", "error", fetchErr.Err)
 			}
+		}
+		if records.NumRecords() == 0 {
+			<-worker.slot
+			continue
 		}
 		records.EachRecord(func(record *kgo.Record) {
 			id, err := uuid.Parse(string(record.Value))
 			if err != nil {
+				<-worker.slot
 				worker.Log.Error("discard invalid job message")
 				_ = worker.Kafka.CommitRecords(ctx, record)
 				return
 			}
-			select {
-			case worker.slot <- struct{}{}:
-				owner := uuid.NewString()
-				job, err := worker.Jobs.Claim(ctx, id, owner)
-				if err != nil {
-					<-worker.slot
-					if !errors.Is(err, pgx.ErrNoRows) {
-						worker.Log.Error("claim job", "job_id", id, "error", err)
-						return
-					}
-				} else {
-					worker.wg.Go(func() { defer func() { <-worker.slot }(); worker.process(ctx, job.ID, owner) })
+			owner := uuid.NewString()
+			job, err := worker.Jobs.Claim(ctx, id, owner)
+			if err != nil {
+				<-worker.slot
+				if !errors.Is(err, pgx.ErrNoRows) {
+					worker.Log.Error("claim job", "job_id", id, "error", err)
+					return
 				}
-			case <-ctx.Done():
-				return
+			} else {
+				worker.wg.Go(func() { defer func() { <-worker.slot }(); worker.process(ctx, job.ID, owner) })
 			}
 			if err = worker.Kafka.CommitRecords(ctx, record); err != nil {
 				worker.Log.Error("commit kafka offset", "error", err)
@@ -169,7 +177,11 @@ func (worker *Worker) process(parent context.Context, id uuid.UUID, owner string
 				return
 			case <-tick.C:
 				if err := worker.Jobs.Heartbeat(ctx, id, owner); err != nil {
-					worker.metrics.Event("lease_lost", "")
+					if errors.Is(err, jobs.ErrLeaseLost) {
+						worker.metrics.Event("lease_lost", "")
+					} else {
+						worker.metrics.Event("heartbeat_error", "")
+					}
 					worker.Log.Error("job heartbeat", "job_id", id, "error", err)
 					cancel()
 					return
@@ -186,7 +198,19 @@ func (worker *Worker) process(parent context.Context, id uuid.UUID, owner string
 	if errValue == nil {
 		return
 	}
-	worker.Log.Error("process job", "job_id", id, "type", job.Type, "error", errValue)
+	worker.Log.Error(
+		"process job",
+		"job_id",
+		id,
+		"job_type",
+		job.Type,
+		"attempt",
+		job.Attempts,
+		"lease_owner",
+		owner,
+		"error",
+		errValue,
+	)
 	retryCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stop()
 	code, isPermanent := jobs.PermanentCode(errValue)
@@ -230,6 +254,17 @@ func (worker *Worker) CleanupFiles(ctx context.Context) error { return worker.Jo
 // Ошибка одной задачи не должна завершать весь worker. Восстановление определяется
 // арендой и сохранённой позицией, как и при обычной ошибке обработки.
 func (worker *Worker) execute(ctx context.Context, job dbgen.Job, owner string) (err error) {
+	started := time.Now()
+	defer func() {
+		outcome := "success"
+		if err != nil {
+			outcome = "error"
+		}
+		if errors.Is(err, jobs.ErrLeaseLost) {
+			worker.metrics.Event("lease_lost", string(job.Type))
+		}
+		worker.metrics.Duration.WithLabelValues(string(job.Type), outcome).Observe(time.Since(started).Seconds())
+	}()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			worker.Log.ErrorContext(
@@ -245,15 +280,6 @@ func (worker *Worker) execute(ctx context.Context, job dbgen.Job, owner string) 
 			err = fmt.Errorf("job processor panic")
 		}
 	}()
-	started := time.Now()
 	err = worker.Jobs.Execute(ctx, job, owner)
-	outcome := "success"
-	if err != nil {
-		outcome = "error"
-	}
-	if errors.Is(err, jobs.ErrLeaseLost) {
-		worker.metrics.Event("lease_lost", string(job.Type))
-	}
-	worker.metrics.Duration.WithLabelValues(string(job.Type), outcome).Observe(time.Since(started).Seconds())
 	return err
 }

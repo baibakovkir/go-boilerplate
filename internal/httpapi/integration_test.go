@@ -1012,7 +1012,14 @@ func TestIntegration(t *testing.T) {
 		stopWorker()
 		<-workerDone
 		verifyArchitecture(t, db, redisClient, config, store, service)
-		t.Run("two-worker-processes", func(t *testing.T) { verifyWorkerProcesses(t, db, config, service, kafkaClient) })
+		t.Run(
+			"parallel-worker",
+			func(t *testing.T) { verifyWorkerProcesses(t, db, config, service, kafkaClient, 1, 2) },
+		)
+		t.Run(
+			"two-worker-processes",
+			func(t *testing.T) { verifyWorkerProcesses(t, db, config, service, kafkaClient, 2, 1) },
+		)
 		kernel, errValue := jobs.New(db, redisClient, config, store, metrics)
 		if errValue != nil {
 			t.Fatal(errValue)
@@ -1198,7 +1205,7 @@ func TestIntegration(t *testing.T) {
 		if err := json.Unmarshal(buffer, &ownTicket); err != nil {
 			t.Fatal(err)
 		}
-		wsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		wsCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		ws, _, err := websocket.Dial(wsCtx, "ws"+strings.TrimPrefix(httpServer.URL, "http")+ownTicket.URL, nil)
 		if err != nil {
@@ -1210,6 +1217,32 @@ func TestIntegration(t *testing.T) {
 		}
 		if err = wsjson.Read(wsCtx, ws, &event); err != nil || event.Job.ID != ownID {
 			t.Fatal("own websocket denied", err)
+		}
+		// PostgreSQL остаётся источником состояния при потере Pub/Sub.
+		if _, err = db.Pool.Exec(ctx, "UPDATE jobs SET version=version+1 WHERE id=$1", ownID); err != nil {
+			t.Fatal(err)
+		}
+		previousVersion := event.Job.Version
+		if err = wsjson.Read(wsCtx, ws, &event); err != nil || event.Job.Version <= previousVersion {
+			t.Fatal("websocket polling did not reconcile", err)
+		}
+		expect(
+			t,
+			200,
+			"PATCH",
+			"/api/v1/admin/users/"+alpha.ID.String()+"/blocked",
+			map[string]bool{"blocked": true},
+			admin.AccessToken,
+			nil,
+		)
+		for {
+			err = wsjson.Read(wsCtx, ws, &event)
+			if err != nil {
+				break
+			}
+		}
+		if websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+			t.Fatalf("blocked user websocket remained accessible: %v", err)
 		}
 	})
 	if strings.Contains(logs.String(), "secret1") || strings.Contains(logs.String(), "admin123") {

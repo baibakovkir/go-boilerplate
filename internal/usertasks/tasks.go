@@ -69,7 +69,7 @@ func CreateImport(ctx context.Context,
 	}
 	id := uuid.New()
 	name := id.String() + ".source." + string(format)
-	file, err := os.CreateTemp(config.Jobs.Directory, "upload-*")
+	file, err := os.CreateTemp(config.Jobs.Directory, id.String()+".upload-*")
 	if err != nil {
 		return jobs.Snapshot{}, err
 	}

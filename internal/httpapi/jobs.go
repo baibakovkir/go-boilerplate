@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"go-boilerplate/internal/apperror"
 	"go-boilerplate/internal/auth"
 	"go-boilerplate/internal/database/dbgen"
 	"go-boilerplate/internal/jobs"
@@ -70,7 +71,7 @@ func (server *Server) registerJobs() {
 		index.Body.Email = auth.NormalizeEmail(index.Body.Email)
 		job, err := usertasks.CreateExport(ctx, server.Jobs, jobs.ForPrincipal(principal), index.Body)
 		if err != nil {
-			return nil, server.Auth.Failure(ctx, "create export", err)
+			return nil, apperror.Failure("create export", err)
 		}
 		return &JobOutput{job}, nil
 	})
@@ -130,7 +131,7 @@ func (server *Server) visibleJob(ctx context.Context, id uuid.UUID) (dbgen.Job, 
 		return job, huma.Error404NotFound("job not found")
 	}
 	if err != nil {
-		return job, server.Auth.Failure(ctx, "get job", err)
+		return job, apperror.Failure("get job", err)
 	}
 	if !jobs.CanRead(job, auth.Current(ctx)) {
 		return job, huma.Error404NotFound("job not found")
@@ -167,7 +168,7 @@ func (server *Server) registerJobRoutes(base string, role auth.Role) {
 					})
 			}
 			if err != nil {
-				return nil, server.Auth.Failure(ctx, "list jobs", err)
+				return nil, apperror.Failure("list jobs", err)
 			}
 			out := &JobListOutput{}
 			out.Body.Items = []jobs.Snapshot{}
@@ -217,7 +218,7 @@ func (server *Server) registerJobRoutes(base string, role auth.Role) {
 					Offset: job.Offset,
 				})
 			if err != nil {
-				return nil, server.Auth.Failure(ctx, "list issues", err)
+				return nil, apperror.Failure("list issues", err)
 			}
 			out := &JobErrorsOutput{}
 			out.Body.Items = []JobIssue{}
@@ -321,7 +322,7 @@ func (server *Server) upload(response http.ResponseWriter, request *http.Request
 		return
 	}
 	if err != nil {
-		server.rawError(response, request, server.Auth.Failure(ctx, "upload import", err))
+		server.rawError(response, request, apperror.Failure("upload import", err))
 		return
 	}
 	writeJSON(response, 202, snapshot)
@@ -377,7 +378,7 @@ func (server *Server) download(response http.ResponseWriter, request *http.Reque
 	}
 	data, err := jobs.Decode(job)
 	if err != nil {
-		server.rawError(response, request, server.Auth.Failure(request.Context(), "decode job files", err))
+		server.rawError(response, request, apperror.Failure("decode job files", err))
 		return
 	}
 	artifact, found := data.FindFile(dbgen.JobFileRoleResult)
@@ -391,7 +392,7 @@ func (server *Server) download(response http.ResponseWriter, request *http.Reque
 		return
 	}
 	if err != nil {
-		server.rawError(response, request, server.Auth.Failure(request.Context(), "open artifact", err))
+		server.rawError(response, request, apperror.Failure("open artifact", err))
 		return
 	}
 	defer file.Close()
@@ -423,7 +424,7 @@ func (server *Server) report(response http.ResponseWriter, request *http.Request
 	defer cancel()
 	rows, err := server.Queries.Issues(ctx, job.ID)
 	if err != nil {
-		server.rawError(response, request, server.Auth.Failure(ctx, "open issue report", err))
+		server.rawError(response, request, apperror.Failure("open issue report", err))
 		return
 	}
 	defer rows.Close()

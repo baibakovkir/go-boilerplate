@@ -115,6 +115,7 @@ func (server *Server) websocket(response http.ResponseWriter, request *http.Requ
 	sub := server.Realtime.Subscribe(ctx, ticket.JobID)
 	defer sub.Close()
 	if _, err = sub.Receive(ctx); err != nil {
+		server.Log.ErrorContext(ctx, "subscribe job", "job_id", ticket.JobID, "error", err)
 		conn.Close(websocket.StatusInternalError, "subscription unavailable")
 		return
 	}
@@ -145,6 +146,7 @@ func (server *Server) websocket(response http.ResponseWriter, request *http.Requ
 		return nil
 	}
 	if err = send(); err != nil {
+		_ = transportError(ctx, server.Log, err)
 		conn.Close(websocket.StatusPolicyViolation, "subscription unavailable")
 		return
 	}
@@ -168,6 +170,7 @@ func (server *Server) websocket(response http.ResponseWriter, request *http.Requ
 			seconds++
 			if dirty || seconds%5 == 0 {
 				if err = send(); err != nil {
+					_ = transportError(ctx, server.Log, err)
 					conn.Close(websocket.StatusPolicyViolation, "session or subscription ended")
 					return
 				}

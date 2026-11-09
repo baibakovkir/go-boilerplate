@@ -113,6 +113,7 @@ func verifyWorkerProcesses(t *testing.T,
 	config *appconfig.Config,
 	service *jobs.Service,
 	client *kgo.Client,
+	processCount, concurrency int,
 ) {
 	t.Helper()
 	ctx := context.Background()
@@ -124,8 +125,9 @@ func verifyWorkerProcesses(t *testing.T,
 	}
 	defer db.Pool.Exec(ctx, "DROP TABLE architecture_release")
 	workerConfig := *config
-	workerConfig.Kafka.Topic = config.Kafka.Topic + ".processes"
-	workerConfig.Kafka.Group = config.Kafka.Group + ".processes"
+	workerConfig.Jobs.Concurrency = concurrency
+	workerConfig.Kafka.Topic = config.Kafka.Topic + ".processes." + uuid.NewString()
+	workerConfig.Kafka.Group = workerConfig.Kafka.Topic
 	admin := kadm.NewClient(client)
 	results, err := admin.CreateTopics(ctx, 2, 1, nil, workerConfig.Kafka.Topic)
 	if err != nil {
@@ -137,6 +139,39 @@ func verifyWorkerProcesses(t *testing.T,
 		}
 	}
 	defer admin.DeleteTopics(ctx, workerConfig.Kafka.Topic)
+	defer admin.DeleteGroups(ctx, workerConfig.Kafka.Group)
+	ids := []uuid.UUID{}
+	for index := 0; index < 4; index++ {
+		snapshot, err := service.Create(ctx, uuid.New(), jobs.Actor{}, dbgen.JobTypeUsersexport, jobs.Data{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, snapshot.ID)
+	}
+	producer, err := kgo.NewClient(
+		kgo.SeedBrokers(config.Kafka.Brokers...),
+		kgo.RecordPartitioner(kgo.ManualPartitioner()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer producer.Close()
+	partitions := map[uuid.UUID]int32{}
+	for index, id := range ids {
+		partitions[id] = int32(index % 2)
+	}
+	publish := func(ctx context.Context, id uuid.UUID) error {
+		return producer.ProduceSync(ctx,
+			&kgo.Record{
+				Topic:     workerConfig.Kafka.Topic,
+				Partition: partitions[id],
+				Key:       []byte(id.String()),
+				Value:     []byte(id.String()),
+			}).FirstErr()
+	}
+	if err = service.Dispatch(ctx, publish); err != nil {
+		t.Fatal(err)
+	}
 	type runningProcess struct {
 		command *exec.Cmd
 		done    chan error
@@ -160,7 +195,7 @@ func verifyWorkerProcesses(t *testing.T,
 			}
 		}
 	}()
-	for index := 0; index < 2; index++ {
+	for index := 0; index < processCount; index++ {
 		directory := t.TempDir()
 		workerConfig.Jobs.Directory = directory
 		body, err := yaml.Marshal(workerConfig)
@@ -191,36 +226,17 @@ func verifyWorkerProcesses(t *testing.T,
 		go func() { done <- command.Wait() }()
 		processes = append(processes, runningProcess{command, done})
 	}
-	ids := []uuid.UUID{}
-	for index := 0; index < 4; index++ {
-		snapshot, err := service.Create(ctx, uuid.New(), jobs.Actor{}, dbgen.JobTypeUsersexport, jobs.Data{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		ids = append(ids, snapshot.ID)
-	}
-	publish := func(ctx context.Context, id uuid.UUID) error {
-		return client.ProduceSync(ctx,
-			&kgo.Record{
-				Topic: workerConfig.Kafka.Topic,
-				Key:   []byte(id.String()),
-				Value: []byte(id.String()),
-			}).FirstErr()
-	}
-	if err = service.Dispatch(ctx, publish); err != nil {
-		t.Fatal(err)
-	}
 	waitCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		var owners int
-		if err = db.Pool.QueryRow(waitCtx, `SELECT count(DISTINCT data->'checkpoint'->>'pid') FROM jobs
-  WHERE id=ANY($1) AND status='running'`, ids).Scan(&owners); err != nil {
+		var owners, active int
+		if err = db.Pool.QueryRow(waitCtx, `SELECT count(DISTINCT data->'checkpoint'->>'pid'),count(*) FROM jobs
+  WHERE id=ANY($1) AND status='running'`, ids).Scan(&owners, &active); err != nil {
 			t.Fatal(err)
 		}
-		if owners == 2 {
+		if owners == processCount && active == processCount*concurrency {
 			break
 		}
 		select {
